@@ -8,3 +8,7 @@ eval_results
 tests
 .DS_Store
 gradio.sh
+command_list.md
+models
+profile
+test_images

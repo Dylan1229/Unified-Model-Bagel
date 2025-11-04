@@ -4,9 +4,9 @@ import os
 import random
 import re
 import sys
-from pathlib import Path
-from typing import List, Tuple
 from datetime import datetime
+from pathlib import Path
+from typing import List
 
 import numpy as np
 import torch
@@ -16,13 +16,13 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from accelerate import infer_auto_device_map, init_empty_weights, load_checkpoint_and_dispatch  # noqa: E402
+from accelerate import infer_auto_device_map, init_empty_weights, load_checkpoint_and_dispatch
 
-from data.transforms import ImageTransform  # noqa: E402
-from data.data_utils import add_special_tokens  # noqa: E402
-from inferencer import InterleaveInferencer  # noqa: E402
-from modeling.autoencoder import load_ae  # noqa: E402
-from modeling.bagel import (  # noqa: E402
+from data.transforms import ImageTransform
+from data.data_utils import add_special_tokens
+from inferencer import InterleaveInferencer
+from modeling.autoencoder import load_ae
+from modeling.bagel import (
     Bagel,
     BagelConfig,
     Qwen2Config,
@@ -30,7 +30,7 @@ from modeling.bagel import (  # noqa: E402
     SiglipVisionConfig,
     SiglipVisionModel,
 )
-from modeling.qwen2 import Qwen2Tokenizer  # noqa: E402
+from modeling.qwen2 import Qwen2Tokenizer
 
 
 def sanitize_filename(text: str, max_length: int = 50) -> str:
@@ -51,6 +51,7 @@ def sanitize_filename(text: str, max_length: int = 50) -> str:
 
 
 def setup_seed(seed: int = 42) -> None:
+    """Set random seed for reproducibility"""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -62,41 +63,51 @@ def setup_seed(seed: int = 42) -> None:
 
 
 def load_model(model_path: str, max_mem_per_gpu: str = "80GiB"):
+    """Load and initialize the BAGEL model"""
+    
+    # LLM config preparing
     llm_config = Qwen2Config.from_json_file(os.path.join(model_path, "llm_config.json"))
     llm_config.qk_norm = True
     llm_config.tie_word_embeddings = False
     llm_config.layer_module = "Qwen2MoTDecoderLayer"
 
+    # ViT config preparing
     vit_config = SiglipVisionConfig.from_json_file(os.path.join(model_path, "vit_config.json"))
     vit_config.rope = False
     vit_config.num_hidden_layers = vit_config.num_hidden_layers - 1
 
+    # VAE loading
     vae_model, vae_config = load_ae(local_path=os.path.join(model_path, "ae.safetensors"))
 
+    # Bagel config preparing
     config = BagelConfig(
         visual_gen=True,
         visual_und=True,
-        llm_config=llm_config,
+        llm_config=llm_config, 
         vit_config=vit_config,
         vae_config=vae_config,
         vit_max_num_patch_per_side=70,
-        connector_act="gelu_pytorch_tanh",
+        connector_act='gelu_pytorch_tanh',
         latent_patch_size=2,
         max_latent_size=64,
     )
 
+    # Initialize model with empty weights
     with init_empty_weights():
         language_model = Qwen2ForCausalLM(llm_config)
         vit_model = SiglipVisionModel(vit_config)
         model = Bagel(language_model, vit_model, config)
         model.vit_model.vision_model.embeddings.convert_conv2d_to_linear(vit_config, meta=True)
 
+    # Tokenizer Preparing
     tokenizer = Qwen2Tokenizer.from_pretrained(model_path)
     tokenizer, new_token_ids, _ = add_special_tokens(tokenizer)
 
+    # Image Transform Preparing
     vae_transform = ImageTransform(1024, 512, 16)
     vit_transform = ImageTransform(980, 224, 14)
 
+    # Device map configuration
     device_map = infer_auto_device_map(
         model,
         max_memory={i: max_mem_per_gpu for i in range(torch.cuda.device_count())},
@@ -104,29 +115,31 @@ def load_model(model_path: str, max_mem_per_gpu: str = "80GiB"):
     )
     print(f"Device map: {device_map}")
 
+    # Ensure certain modules are on the same device
     same_device_modules = [
-        "language_model.model.embed_tokens",
-        "time_embedder",
-        "latent_pos_embed",
-        "vae2llm",
-        "llm2vae",
-        "connector",
-        "vit_pos_embed",
+        'language_model.model.embed_tokens',
+        'time_embedder',
+        'latent_pos_embed',
+        'vae2llm',
+        'llm2vae',
+        'connector',
+        'vit_pos_embed'
     ]
 
     if torch.cuda.device_count() == 1:
         first_device = device_map.get(same_device_modules[0], "cuda:0")
-        for module in same_device_modules:
-            if module in device_map:
-                device_map[module] = first_device
+        for k in same_device_modules:
+            if k in device_map:
+                device_map[k] = first_device
             else:
-                device_map[module] = "cuda:0"
+                device_map[k] = "cuda:0"
     else:
         first_device = device_map.get(same_device_modules[0])
-        for module in same_device_modules:
-            if module in device_map:
-                device_map[module] = first_device
+        for k in same_device_modules:
+            if k in device_map:
+                device_map[k] = first_device
 
+    # Load checkpoint and dispatch
     model = load_checkpoint_and_dispatch(
         model,
         checkpoint=os.path.join(model_path, "ema.safetensors"),
@@ -134,50 +147,63 @@ def load_model(model_path: str, max_mem_per_gpu: str = "80GiB"):
         offload_buffers=True,
         dtype=torch.bfloat16,
         force_hooks=True,
-        offload_folder="/tmp/offload",
+        offload_folder="/tmp/offload"
     )
+
     model = model.eval()
-    print("Model loaded successfully")
+    print('Model loaded successfully')
 
     return model, vae_model, tokenizer, vae_transform, vit_transform, new_token_ids
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Batch image understanding with BAGEL.")
+    parser = argparse.ArgumentParser(description="Batch text-to-image generation for BAGEL.")
     parser.add_argument("--model_path", default="./models/BAGEL-7B-MoT", help="Path to the model directory.")
-    parser.add_argument("--prompt_pth", default="./data_profile/prompt/editing.csv", help="CSV file with 'prompt' and 'image' columns.")
-    parser.add_argument("--output", default="./results/image_edit", help="Directory to store edited images and optional texts.")
+    parser.add_argument("--prompt_pth", default="./data_profile/prompt/text2image.csv", help="CSV file with 'prompt' and 'image' columns.")
+    parser.add_argument("--output", default="./results/image_gen", help="Directory to store edited images and optional texts.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility.")
     parser.add_argument("--max_mem_per_gpu", default="80GiB", help="Max memory per GPU for dispatch.")
-    parser.add_argument("--think", action="store_true", default=False, help="Enable think mode before image generation.")
+    parser.add_argument("--think", default=True, help="Enable think mode before generation.")
     parser.add_argument("--do_sample", action="store_true", default=False, help="Enable sampling during text decoding.")
-    parser.add_argument("--temperature", type=float, default=1.0, help="Sampling temperature if do_sample is set.")
     parser.add_argument("--max_think_token_n", type=int, default=1000, help="Maximum number of thinking tokens.")
+    parser.add_argument("--cfg_text_scale", type=float, default=4.0)
+    parser.add_argument("--cfg_img_scale", type=float, default=1.0)
+    parser.add_argument("--cfg_interval", type=float, nargs=2, default=[0.4, 1.0])
+    parser.add_argument("--timestep_shift", type=float, default=3.0)
+    parser.add_argument("--num_timesteps", type=int, default=50)
+    parser.add_argument("--cfg_renorm_min", type=float, default=0.0)
+    parser.add_argument(
+        "--image_shapes",
+        type=int,
+        nargs=2,
+        metavar=("HEIGHT", "WIDTH"),
+        default=(1024, 1024),
+        help="Output image resolution as height and width.",
+    )
+    parser.add_argument(
+        "--cfg_renorm_type",
+        choices=["global", "channel", "text_channel"],
+        default="global",
+    )
+    parser.add_argument("--enable_taylorseer", action="store_true", help="Enable TaylorSeer acceleration if available.")
     return parser.parse_args()
 
 
-def load_prompt_image_pairs(csv_path: Path) -> List[Tuple[str, Path]]:
-    pairs: List[Tuple[str, Path]] = []
+def load_prompts(csv_path: Path) -> List[str]:
+    prompts: List[str] = []
     with csv_path.open("r", encoding="utf-8", newline="") as handle:
-        reader = csv.DictReader(handle)
-        if reader.fieldnames is None:
-            raise ValueError("CSV must include a header with 'prompt' and 'image' columns.")
-        header_map = {name.lower(): name for name in reader.fieldnames}
-        prompt_key = header_map.get("prompt")
-        image_key = header_map.get("image")
-        if prompt_key is None or image_key is None:
-            raise ValueError(f"CSV header must contain 'prompt' and 'image' columns. Found: {reader.fieldnames}")
-
-        base_dir = csv_path.parent
+        reader = csv.reader(handle)
+        next(reader, None)  # skip header
         for row in reader:
-            prompt = (row.get(prompt_key) or "").strip()
-            image_rel = (row.get(image_key) or "").strip()
-            if not prompt or not image_rel:
+            if not row:
                 continue
-            # image_path = (base_dir / image_rel).expanduser().resolve()
-            image_path = Path(image_rel).expanduser().resolve()
-            pairs.append((prompt, image_path))
-    return pairs
+            value = row[1].strip()
+            if not value:
+                continue
+            if len(prompts) == 0 and value.lower() in {"prompt", "text"} and len(row) == 1:
+                continue
+            prompts.append(value)
+    return prompts
 
 
 def main() -> None:
@@ -189,13 +215,13 @@ def main() -> None:
     if not csv_path.is_file():
         raise FileNotFoundError(f"Prompt CSV not found: {csv_path}")
 
-    pairs = load_prompt_image_pairs(csv_path)
-    if not pairs:
-        raise ValueError(f"No valid prompt/image pairs found in {csv_path}")
+    prompts = load_prompts(csv_path)
+    if not prompts:
+        raise ValueError(f"No prompts found in {csv_path}")
 
     output_dir = Path(args.output).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-
+    
     torch.cuda.nvtx.range_push("Model Loading")
     model, vae_model, tokenizer, vae_transform, vit_transform, new_token_ids = load_model(
         args.model_path,
@@ -205,45 +231,51 @@ def main() -> None:
 
     torch.cuda.nvtx.range_push("Inferencer Init")
     inferencer = InterleaveInferencer(
-        model=model,
-        vae_model=vae_model,
-        tokenizer=tokenizer,
-        vae_transform=vae_transform,
-        vit_transform=vit_transform,
-        new_token_ids=new_token_ids,
+        model=model, 
+        vae_model=vae_model, 
+        tokenizer=tokenizer, 
+        vae_transform=vae_transform, 
+        vit_transform=vit_transform, 
+        new_token_ids=new_token_ids
     )
     torch.cuda.nvtx.range_pop()
-
     inference_hyper = dict(
         max_think_token_n=args.max_think_token_n,
         do_sample=args.do_sample,
-        text_temperature=args.temperature,
-        understanding_output=True,
+        cfg_text_scale=args.cfg_text_scale,
+        cfg_img_scale=args.cfg_img_scale,
+        cfg_interval=args.cfg_interval,
+        timestep_shift=args.timestep_shift,
+        num_timesteps=args.num_timesteps,
+        cfg_renorm_min=args.cfg_renorm_min,
+        cfg_renorm_type=args.cfg_renorm_type,
+        image_shapes=args.image_shapes,
+        enable_taylorseer=args.enable_taylorseer,
     )
 
-    for idx, (prompt, image_path) in enumerate(pairs):
-        if not image_path.is_file():
-            print(f"Warning: image not found for row {idx}: {image_path}")
-            continue
-
-        print(f"[{idx + 1}/{len(pairs)}] Understanding image {image_path} with prompt: {prompt}")
-        with Image.open(image_path) as pil_image:
-            pil_image = pil_image.convert("RGB")
-            output = inferencer(image=pil_image, text=prompt, **inference_hyper)
-
-        text_output = output.get("text")
-        if not text_output:
-            print(f"Warning: no textual output produced for row {idx}")
-            continue
+    for idx, prompt in enumerate(prompts):
+        print(f"[{idx + 1}/{len(prompts)}] Generating image for prompt: {prompt}")
         
         # Generate unique filename using prompt prefix and timestamp
         prompt_prefix = sanitize_filename(prompt)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]  # microseconds to milliseconds
         filename_base = f"{prompt_prefix}_{timestamp}"
         
-        text_out_path = output_dir / f"{filename_base}.txt"
-        text_out_path.write_text(text_output, encoding="utf-8")
-        print(f"Saved text output to {text_out_path}")
+        output = inferencer(text=prompt, think=args.think, **inference_hyper)
+        image: Image.Image = output.get("image")
+        text_output = output.get("text")
+
+        image_path = output_dir / f"{filename_base}.png"
+        if image is None:
+            print(f"Warning: no image generated for prompt index {idx}")
+        else:
+            image.save(image_path)
+            print(f"Saved image to {image_path}")
+
+        if text_output:
+            text_path = output_dir / f"{filename_base}.txt"
+            text_path.write_text(text_output, encoding="utf-8")
+            print(f"Saved text output to {text_path}")
 
 
 if __name__ == "__main__":
