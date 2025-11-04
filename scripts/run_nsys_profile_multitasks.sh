@@ -7,7 +7,7 @@ fi
 
 cd $project_root
 nsys profile \
-  -o ./results/reports/nsys/nsys_profile_multitasks\
+  -o ./results/reports/nsys/nsys_profile_multitasks \
   --trace=cuda,nvtx,osrt,cudnn \
   --python-sampling=true \
   --sample=cpu \
