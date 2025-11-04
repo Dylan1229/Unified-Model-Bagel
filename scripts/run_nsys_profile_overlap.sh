@@ -7,7 +7,7 @@ fi
 
 cd $project_root
 nsys profile \
-  -o ./profile/profile_result/nsys_profile_overlap \
+  -o ./results/reports/nsys/nsys_profile_overlap \
   --trace=cuda,nvtx,osrt \
   --python-sampling=true \
   --sample=cpu \

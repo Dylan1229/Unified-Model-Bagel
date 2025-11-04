@@ -7,7 +7,7 @@ fi
 
 cd $project_root
 nsys profile \
-  -o ./profile/profile_result/nsys_profile_gen_batch \
+  -o ./results/reports/nsys/nsys_profile_gen_batch \
   --trace=cuda,nvtx,osrt,cudnn,cublas \
   --python-sampling=true \
   --sample=cpu \
@@ -21,10 +21,6 @@ nsys profile \
     --do_sample \
     --think True \
     --seed 42
-
-
-
-
 
 echo ""
 echo "============================================"

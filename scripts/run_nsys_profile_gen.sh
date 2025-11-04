@@ -14,7 +14,7 @@ nsys profile \
   --force-overwrite=true \
   --stats=true \
   --cuda-memory-usage=true \
-  python ./scripts/inference/image_gen.py \
+  python .results/reports/nsys/image_gen.py \
     --model_path ./models/BAGEL-7B-MoT \
     --prompt_pth ./data_profile/prompt/text2image.csv \
     --output ./results/image_gen \
