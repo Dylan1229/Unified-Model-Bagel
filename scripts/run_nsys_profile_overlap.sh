@@ -1,5 +1,5 @@
 #!/bin/bash
-export cuda_visible_devices=0
+export cuda_visible_devices=1,2,3,4
 project_root="/mnt"
 if [[ ":$PYTHONPATH:" != *":$project_root:"* ]]; then
   export PYTHONPATH="$project_root:$PYTHONPATH"
@@ -8,19 +8,22 @@ fi
 cd $project_root
 nsys profile \
   -o ./results/reports/nsys/nsys_profile_overlap \
-  --trace=cuda,nvtx,osrt \
+  --trace=cuda,nvtx,osrt,cudnn \
   --python-sampling=true \
   --sample=cpu \
   --force-overwrite=true \
   --stats=true \
   --cuda-memory-usage=true \
-  torchrun --nproc_per_node=2 scripts/inference_batch/multi_tasks.py \
+  torchrun --nproc_per_node=2 scripts/inference_batch/multi_tasks_main.py \
     --model_path ./models/BAGEL-7B-MoT \
     --tasks ./data_profile/multi_tasks/tasks_mixed.json \
     --output ./results/multi_tasks \
-    --seed 42 \
-    --overlap_text_diffusion 
+    --parallel_method staged_diffusion \
+    --diffusion_gpu 0 \
+    --decode_gpus 1 \
+    --seed 42
 
 echo ""
 echo "============================================"
 echo "Profiling finished"
+

@@ -14,7 +14,7 @@ nsys profile \
   --force-overwrite=true \
   --stats=true \
   --cuda-memory-usage=true \
-  torchrun --nproc_per_node=4 scripts/inference_batch/multi_tasks.py \
+  torchrun --nproc_per_node=4 scripts/inference_batch/multi_tasks_main.py \
     --model_path ./models/BAGEL-7B-MoT \
     --tasks ./data_profile/multi_tasks/tasks_mixed.json \
     --output ./results/multi_tasks \

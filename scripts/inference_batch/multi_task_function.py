@@ -78,102 +78,6 @@ def sanitize_filename(text: str, max_length: int = 50) -> str:
         safe = safe[:max_length].rstrip("._")
     return safe
 
-    available_gpus = torch.cuda.device_count()
-    if available_gpus == 0:
-        raise RuntimeError("CUDA device is required but not available.")
-
-    if num_gpus is None or num_gpus <= 0:
-        num_gpus = available_gpus
-    else:
-        num_gpus = min(num_gpus, available_gpus)
-
-    device_ids = list(range(num_gpus))
-    llm_config = Qwen2Config.from_json_file(os.path.join(model_path, "llm_config.json"))
-    llm_config.qk_norm = True
-    llm_config.tie_word_embeddings = False
-    llm_config.layer_module = "Qwen2MoTDecoderLayer"
-
-    vit_config = SiglipVisionConfig.from_json_file(os.path.join(model_path, "vit_config.json"))
-    vit_config.rope = False
-    vit_config.num_hidden_layers = vit_config.num_hidden_layers - 1
-
-    vae_model, vae_config = load_ae(local_path=os.path.join(model_path, "ae.safetensors"))
-
-    config = BagelConfig(
-        visual_gen=True,
-        visual_und=True,
-        llm_config=llm_config,
-        vit_config=vit_config,
-        vae_config=vae_config,
-        vit_max_num_patch_per_side=70,
-        connector_act="gelu_pytorch_tanh",
-        latent_patch_size=2,
-        max_latent_size=64,
-    )
-
-    with init_empty_weights():
-        language_model = Qwen2ForCausalLM(llm_config)
-        vit_model = SiglipVisionModel(vit_config)
-        model = Bagel(language_model, vit_model, config)
-        model.vit_model.vision_model.embeddings.convert_conv2d_to_linear(vit_config, meta=True)
-
-    tokenizer = Qwen2Tokenizer.from_pretrained(model_path)
-    tokenizer, new_token_ids, _ = add_special_tokens(tokenizer)
-
-    vae_transform = ImageTransform(1024, 512, 16)
-    vit_transform = ImageTransform(980, 224, 14)
-
-    device_map = infer_auto_device_map(
-        model,
-        max_memory={i: max_mem_per_gpu for i in device_ids},
-        no_split_module_classes=["Bagel", "Qwen2MoTDecoderLayer"],
-    )
-
-    same_device_modules = [
-        "language_model.model.embed_tokens",
-        "time_embedder",
-        "latent_pos_embed",
-        "vae2llm",
-        "llm2vae",
-        "connector",
-        "vit_pos_embed",
-    ]
-
-    if num_gpus == 1:
-        default_device = f"cuda:{device_ids[0]}"
-        first_device = device_map.get(same_device_modules[0], default_device)
-        for module in same_device_modules:
-            device_map[module] = device_map.get(module, first_device)
-    else:
-        first_device = device_map.get(same_device_modules[0])
-        if first_device is None:
-            first_device = f"cuda:{device_ids[0]}"
-        for module in same_device_modules:
-            if module in device_map:
-                device_map[module] = first_device
-
-    model = load_checkpoint_and_dispatch(
-        model,
-        checkpoint=os.path.join(model_path, "ema.safetensors"),
-        device_map=device_map,
-        offload_buffers=True,
-        dtype=torch.bfloat16,
-        force_hooks=True,
-        offload_folder="/tmp/offload",
-    ).eval()
-
-    used_devices = set()
-    for device in device_map.values():
-        if isinstance(device, str):
-            if device.startswith("cuda"):
-                used_devices.add(device)
-        elif isinstance(device, int):
-            used_devices.add(f"cuda:{device}")
-    used_devices = sorted(used_devices)
-    print(f"Model shards placed on GPUs: {used_devices or [f'cuda:{i}' for i in device_ids]}")
-
-    return model, vae_model, tokenizer, vae_transform, vit_transform, new_token_ids
-
 def parse_task_payload(
     payload: Dict[str, Any],
     output_dir: Path,
@@ -270,12 +174,11 @@ def ensure_path(path: Optional[Path], fallback_stem: str, base_dir: Path, suffix
     return path
 
 
-def run_text_to_image(
-    inferencer: InterleaveInferencer,
+def build_text_to_image_kwargs(
     task: TaskSpec,
     default_shape: Tuple[int, int],
     enable_taylorseer: bool,
-) -> Dict[str, Any]:
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     params = dict(task.params or {})
     shape = tuple(params.pop("image_shape", params.pop("image_shapes", default_shape)))
     if len(shape) != 2:
@@ -284,6 +187,8 @@ def run_text_to_image(
     cfg_interval = params.pop("cfg_interval", [0.4, 1.0])
     if isinstance(cfg_interval, (int, float)):
         cfg_interval = [float(cfg_interval), 1.0]
+    elif isinstance(cfg_interval, tuple):
+        cfg_interval = list(cfg_interval)
 
     inference_kwargs = dict(
         max_think_token_n=params.pop("max_think_token_n", 512),
@@ -291,18 +196,33 @@ def run_text_to_image(
         text_temperature=params.pop("text_temperature", 0.3),
         cfg_text_scale=params.pop("cfg_text_scale", 4.0),
         cfg_img_scale=params.pop("cfg_img_scale", 1.5),
-        cfg_interval=cfg_interval,
+        cfg_interval=tuple(cfg_interval),
         timestep_shift=params.pop("timestep_shift", 3.0),
         num_timesteps=params.pop("num_timesteps", 50),
         cfg_renorm_min=params.pop("cfg_renorm_min", 0.0),
         cfg_renorm_type=params.pop("cfg_renorm_type", "global"),
-        image_shapes=shape,
         enable_taylorseer=params.pop("enable_taylorseer", enable_taylorseer),
     )
     if params:
         raise ValueError(f"Unsupported parameters for text-to-image task: {params}")
 
-    result = inferencer(text=task.prompt or "", think=task.think, **inference_kwargs)
+    call_kwargs = dict(inference_kwargs)
+    call_kwargs["image_shapes"] = shape
+
+    plan_kwargs = dict(inference_kwargs)
+    plan_kwargs["image_shape"] = shape
+
+    return call_kwargs, plan_kwargs
+
+
+def run_text_to_image(
+    inferencer: InterleaveInferencer,
+    task: TaskSpec,
+    default_shape: Tuple[int, int],
+    enable_taylorseer: bool,
+) -> Dict[str, Any]:
+    call_kwargs, _ = build_text_to_image_kwargs(task, default_shape, enable_taylorseer)
+    result = inferencer(text=task.prompt or "", think=task.think, **call_kwargs)
     return result
 
 
@@ -539,238 +459,3 @@ def load_model(
     print(f"Model shards placed on GPUs: {used_devices or [f'cuda:{i}' for i in device_ids]}")
 
     return model, vae_model, tokenizer, vae_transform, vit_transform, new_token_ids
-
-def parse_task_payload(
-    payload: Dict[str, Any],
-    output_dir: Path,
-) -> TaskSpec:
-    task_id = payload.get("task_id") or payload.get("id") or ""
-    prompt = payload.get("prompt")
-    kind = (payload.get("type") or payload.get("kind") or "").lower()
-
-    if not task_id:
-        basis = prompt or kind or "task"
-        task_id = sanitize_filename(basis)
-
-    image_path: Optional[Path] = None
-    if payload.get("image"):
-        image_path = Path(payload["image"]).expanduser().resolve()
-
-    output_image = payload.get("output_image") or payload.get("save_image_to")
-    output_text = payload.get("output_text") or payload.get("save_text_to")
-
-    output_image_path = Path(output_image).expanduser().resolve() if output_image else None
-    output_text_path = Path(output_text).expanduser().resolve() if output_text else None
-
-    return TaskSpec(
-        task_id=task_id,
-        kind=kind,
-        prompt=prompt,
-        image_path=image_path,
-        output_image=output_image_path,
-        output_text=output_text_path,
-        think=bool(payload.get("think", False)),
-        seed=payload.get("seed"),
-        params=payload.get("params"),
-    )
-
-
-def load_tasks(task_file: Optional[Path], output_dir: Path) -> List[TaskSpec]:
-    tasks: List[TaskSpec] = []
-    if task_file is None:
-        demo_tasks = [
-            {
-                "task_id": "demo-text2image",
-                "type": "text2image",
-                "prompt": "A futuristic tram gliding through a neon-lit city at dusk, cinematic lighting, wide shot.",
-                "think": True,
-                "params": {
-                    "max_think_token_n": 512,
-                    "cfg_text_scale": 4.0,
-                    "cfg_interval": 0.4,
-                    "num_timesteps": 50,
-                },
-            },
-            {
-                "task_id": "demo-image-understanding",
-                "type": "image_understanding",
-                "prompt": "Describe the scene and summarize why it is humorous.",
-                "image": str((".." / "images" / "bike.jpg").resolve()),
-                "think": False,
-                "params": {
-                    "max_think_token_n": 512,
-                    "do_sample": False,
-                },
-            },
-        ]
-        for entry in demo_tasks:
-            tasks.append(parse_task_payload(entry, output_dir))
-        return tasks
-
-    task_file = task_file.expanduser().resolve()
-    if not task_file.exists():
-        raise FileNotFoundError(f"Task file not found: {task_file}")
-
-    with task_file.open("r", encoding="utf-8") as handle:
-        if task_file.suffix.lower() in {".yaml", ".yml"}:
-            if yaml is None:
-                raise RuntimeError("PyYAML is required to parse YAML task files.")
-            data = yaml.safe_load(handle)
-        else:
-            data = json.load(handle)
-
-    entries = data if isinstance(data, list) else data.get("tasks")
-    if not entries:
-        raise ValueError(f"No tasks defined in {task_file}")
-
-    for entry in entries:
-        tasks.append(parse_task_payload(entry, output_dir))
-    return tasks
-
-
-def ensure_path(path: Optional[Path], fallback_stem: str, base_dir: Path, suffix: str) -> Path:
-    if path is None:
-        name = sanitize_filename(fallback_stem)
-        path = base_dir / f"{name}{suffix}"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def prepare_text_to_image_plan(
-    inferencer: InterleaveInferencer,
-    task: TaskSpec,
-    default_shape: Tuple[int, int],
-    enable_taylorseer: bool,
-) -> Tuple[TextToImagePlan, Optional[str]]:
-    params = dict(task.params or {})
-    shape = tuple(params.pop("image_shape", params.pop("image_shapes", default_shape)))
-    if len(shape) != 2:
-        raise ValueError(f"image_shape must be [H, W], received: {shape}")
-
-    cfg_interval = params.pop("cfg_interval", [0.4, 1.0])
-    if isinstance(cfg_interval, (int, float)):
-        cfg_interval = [float(cfg_interval), 1.0]
-    elif isinstance(cfg_interval, tuple):
-        cfg_interval = list(cfg_interval)
-    if not (isinstance(cfg_interval, list) and len(cfg_interval) == 2):
-        raise ValueError(f"cfg_interval must be a pair of floats, received: {cfg_interval}")
-
-    inference_kwargs = dict(
-        max_think_token_n=params.pop("max_think_token_n", 512),
-        do_sample=params.pop("do_sample", False),
-        text_temperature=params.pop("text_temperature", 0.3),
-        cfg_text_scale=params.pop("cfg_text_scale", 4.0),
-        cfg_img_scale=params.pop("cfg_img_scale", 1.5),
-        cfg_interval=cfg_interval,
-        timestep_shift=params.pop("timestep_shift", 3.0),
-        num_timesteps=params.pop("num_timesteps", 50),
-        cfg_renorm_min=params.pop("cfg_renorm_min", 0.0),
-        cfg_renorm_type=params.pop("cfg_renorm_type", "global"),
-        enable_taylorseer=params.pop("enable_taylorseer", enable_taylorseer),
-    )
-    if params:
-        raise ValueError(f"Unsupported parameters for text-to-image task: {params}")
-
-    plan, thinking_text = inferencer.prepare_text_to_image(
-        task.prompt or "",
-        think=task.think,
-        image_shape=shape,
-        max_think_token_n=inference_kwargs["max_think_token_n"],
-        do_sample=inference_kwargs["do_sample"],
-        text_temperature=inference_kwargs["text_temperature"],
-        cfg_text_scale=inference_kwargs["cfg_text_scale"],
-        cfg_img_scale=inference_kwargs["cfg_img_scale"],
-        cfg_interval=tuple(inference_kwargs["cfg_interval"]),
-        timestep_shift=inference_kwargs["timestep_shift"],
-        num_timesteps=inference_kwargs["num_timesteps"],
-        cfg_renorm_min=inference_kwargs["cfg_renorm_min"],
-        cfg_renorm_type=inference_kwargs["cfg_renorm_type"],
-        enable_taylorseer=inference_kwargs["enable_taylorseer"],
-    )
-    return plan, thinking_text
-
-
-def run_text_to_image(
-    inferencer: InterleaveInferencer,
-    task: TaskSpec,
-    default_shape: Tuple[int, int],
-    enable_taylorseer: bool,
-) -> Dict[str, Any]:
-    plan, thinking_text = prepare_text_to_image_plan(inferencer, task, default_shape, enable_taylorseer)
-    image = inferencer.render_text_to_image_plan(plan)
-    result = {"image": image, "text": thinking_text}
-    return result
-
-
-def execute_diffusion_async(
-    inferencer: InterleaveInferencer,
-    plan: TextToImagePlan,
-    stream: Optional[torch.cuda.Stream],
-    device_id: int,
-) -> Image.Image:
-    torch.cuda.set_device(device_id)
-    if stream is None:
-        return inferencer.render_text_to_image_plan(plan)
-    with torch.cuda.stream(stream):
-        image = inferencer.render_text_to_image_plan(plan)
-    stream.synchronize()
-    return image
-
-
-def run_image_editing(inferencer: InterleaveInferencer, task: TaskSpec, enable_taylorseer: bool) -> Dict[str, Any]:
-    if task.image_path is None:
-        raise ValueError(f"Task '{task.task_id}' requires an `image` field.")
-    if not task.image_path.exists():
-        raise FileNotFoundError(f"Input image does not exist: {task.image_path}")
-
-    params = dict(task.params or {})
-
-    cfg_interval = params.pop("cfg_interval", [0.0, 1.0])
-    if isinstance(cfg_interval, (int, float)):
-        cfg_interval = [float(cfg_interval), 1.0]
-    elif isinstance(cfg_interval, tuple):
-        cfg_interval = list(cfg_interval)
-    if not (isinstance(cfg_interval, list) and len(cfg_interval) == 2):
-        raise ValueError(f"cfg_interval must be a pair of floats, received: {cfg_interval}")
-
-    inference_kwargs = dict(
-        max_think_token_n=params.pop("max_think_token_n", 1000),
-        do_sample=params.pop("do_sample", True),
-        text_temperature=params.pop("text_temperature", 1.0),
-        cfg_text_scale=params.pop("cfg_text_scale", 4.0),
-        cfg_img_scale=params.pop("cfg_img_scale", 2.0),
-        cfg_interval=cfg_interval,
-        timestep_shift=params.pop("timestep_shift", 3.0),
-        num_timesteps=params.pop("num_timesteps", 50),
-        cfg_renorm_min=params.pop("cfg_renorm_min", 0.0),
-        cfg_renorm_type=params.pop("cfg_renorm_type", "text_channel"),
-        enable_taylorseer=params.pop("enable_taylorseer", enable_taylorseer),
-    )
-
-    if params:
-        raise ValueError(f"Unsupported parameters for image-editing task: {params}")
-
-    with Image.open(task.image_path) as image:
-        image = image.convert("RGB")
-        result = inferencer(image=image, text=task.prompt or "", think=task.think, **inference_kwargs)
-    return result
-
-
-def run_image_understanding(inferencer: InterleaveInferencer, task: TaskSpec) -> Dict[str, Any]:
-    if task.image_path is None:
-        raise ValueError(f"Task '{task.task_id}' requires an `image` field.")
-    if not task.image_path.exists():
-        raise FileNotFoundError(f"Input image does not exist: {task.image_path}")
-
-    params = dict(task.params or {})
-    inference_kwargs = dict(
-        do_sample=params.pop("do_sample", False),
-        text_temperature=params.pop("text_temperature", 0.3),
-        max_think_token_n=params.pop("max_think_token_n", 512),
-    )
-    if params:
-        raise ValueError(f"Unsupported parameters for image-understanding task: {params}")
-
-    image = pil_img2rgb(Image.open(task.image_path).convert("RGB"))
-    result = inferencer(image=image, text=task.prompt or "", think=task.think, understanding_output=True, **inference_kwargs)
-    return result

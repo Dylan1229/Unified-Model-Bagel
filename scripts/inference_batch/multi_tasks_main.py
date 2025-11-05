@@ -1,4 +1,5 @@
 import argparse
+import copy
 import json
 import os
 import random
@@ -6,10 +7,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-from concurrent.futures import Future, ThreadPoolExecutor
 import numpy as np
 import torch
-from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -18,7 +17,6 @@ if str(ROOT) not in sys.path:
 from accelerate import infer_auto_device_map, init_empty_weights, load_checkpoint_and_dispatch
 
 from data.data_utils import add_special_tokens, pil_img2rgb
-from data.transforms import ImageTransform
 from inferencer import InterleaveInferencer
 from modeling.autoencoder import load_ae
 from modeling.bagel import (
@@ -32,17 +30,21 @@ from modeling.bagel import (
 from modeling.qwen2 import Qwen2Tokenizer
 import torch.distributed as dist
 from multi_task_function import (
+    build_text_to_image_kwargs,
+    ensure_path,
     load_model,
     load_tasks,
     run_image_editing,
     run_image_understanding,
-    run_text_to_image,
     setup_distributed,
     setup_seed,
-    ensure_path,
-    prepare_text_to_image_plan,
-    execute_diffusion_async,
-    )
+)
+from scripts.inference_batch.scheduling import (
+    ParallelMode,
+    TextToImageRequest,
+    TextToImageResult,
+    build_scheduler,
+)
 
 try:
     import yaml  # type: ignore
@@ -63,12 +65,31 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--local_rank", type=int, default=-1, help="Local rank provided by torchrun for distributed inference.")
     parser.add_argument("--distributed_backend", type=str, default="nccl", help="torch.distributed backend to use when launched with torchrun.")
     parser.add_argument(
+        "--parallel_method",
+        type=str,
+        default=ParallelMode.DATA_PARALLEL.value,
+        choices=[mode.value for mode in ParallelMode],
+        help="Parallel scheduling strategy: data_parallel (sequential) or staged_diffusion (decode/diffusion split).",
+    )
+    parser.add_argument(
+        "--diffusion_gpu",
+        type=int,
+        default=0,
+        help="GPU index dedicated to diffusion/rendering when using staged diffusion scheduling.",
+    )
+    parser.add_argument(
+        "--decode_gpus",
+        type=str,
+        default=None,
+        help="Comma-separated GPU indices for text decoding workers in staged diffusion scheduling.",
+    )
+    parser.add_argument(
         "--overlap_text_diffusion",
         action="store_true",
-        help="Overlap text decoding of the next text-to-image task with the current diffusion phase using CUDA streams.",
+        help="(Deprecated) Enable staged diffusion scheduling. Use --parallel_method=staged_diffusion instead.",
     )
     return parser.parse_args()
-    
+
 def main() -> None:
     args = parse_args()
     dist_ctx = setup_distributed(args.local_rank)
@@ -81,6 +102,32 @@ def main() -> None:
         raise RuntimeError("CUDA device is required but not available.")
 
     available_gpus = torch.cuda.device_count()
+    requested_mode_value = args.parallel_method
+    if args.overlap_text_diffusion and requested_mode_value == ParallelMode.DATA_PARALLEL.value:
+        requested_mode_value = ParallelMode.STAGED_DIFFUSION.value
+        if rank == 0:
+            print("WARNING: --overlap_text_diffusion is deprecated; use --parallel_method=staged_diffusion instead.")
+    try:
+        parallel_mode = ParallelMode(requested_mode_value)
+    except ValueError as exc:  # noqa: BLE001
+        raise ValueError(f"Unsupported parallel method '{requested_mode_value}'.") from exc
+
+    if distributed and parallel_mode != ParallelMode.DATA_PARALLEL:
+        if rank == 0:
+            print("Staged diffusion scheduling is unavailable in distributed mode. Falling back to data_parallel.")
+        parallel_mode = ParallelMode.DATA_PARALLEL
+
+    def parse_device_list(value: Optional[str]) -> List[int]:
+        if value is None:
+            return []
+        devices: List[int] = []
+        for chunk in value.split(","):
+            chunk = chunk.strip()
+            if not chunk:
+                continue
+            devices.append(int(chunk))
+        return devices
+
     if distributed:
         if local_rank < 0 or local_rank >= available_gpus:
             raise RuntimeError(
@@ -93,8 +140,28 @@ def main() -> None:
             world_size = dist.get_world_size()
         if rank == 0:
             print(f"Distributed inference enabled with world size {world_size}.")
+        diffusion_device = torch.cuda.current_device()
+        decode_gpus: List[int] = []
     else:
-        torch.cuda.set_device(0)
+        diffusion_device = args.diffusion_gpu
+        if diffusion_device < 0 or diffusion_device >= available_gpus:
+            raise ValueError(
+                f"Diffusion GPU index {diffusion_device} is invalid for {available_gpus} available device(s)."
+            )
+        torch.cuda.set_device(diffusion_device)
+        decode_gpus = []
+        if parallel_mode == ParallelMode.STAGED_DIFFUSION:
+            decode_gpus = parse_device_list(args.decode_gpus)
+            if not decode_gpus:
+                decode_gpus = [idx for idx in range(available_gpus) if idx != diffusion_device]
+            decode_gpus = sorted({idx for idx in decode_gpus if idx != diffusion_device})
+            for idx in decode_gpus:
+                if idx < 0 or idx >= available_gpus:
+                    raise ValueError(
+                        f"Decode GPU index {idx} is invalid for {available_gpus} available device(s)."
+                    )
+            if not decode_gpus:
+                raise ValueError("Staged diffusion scheduling requires at least one decode GPU distinct from the diffusion GPU.")
 
     output_dir = args.output.expanduser().resolve()
     if rank == 0:
@@ -110,25 +177,66 @@ def main() -> None:
         if rank == 0:
             print("Naive data parallel mode runs one GPU per process; ignoring --num_gpus.")
 
-    device_ids = [torch.cuda.current_device()] if distributed else None
+    if distributed:
+        model_device_ids = [torch.cuda.current_device()]
+    elif parallel_mode == ParallelMode.STAGED_DIFFUSION:
+        model_device_ids = sorted({diffusion_device, *decode_gpus})
+    else:
+        requested_gpus = args.num_gpus if args.num_gpus and args.num_gpus > 0 else available_gpus
+        num_model_gpus = min(requested_gpus, available_gpus)
+        model_device_ids = list(range(num_model_gpus))
+    if diffusion_device not in model_device_ids:
+        raise ValueError(
+            f"Diffusion GPU {diffusion_device} is not included in the model device map {model_device_ids}."
+        )
+
+    device_ids = [torch.cuda.current_device()] if distributed else model_device_ids
     offload_root = Path("/tmp") / f"offload_rank{rank}" if distributed else None
 
     model, vae_model, tokenizer, vae_transform, vit_transform, new_token_ids = load_model(
         args.model_path,
         max_mem_per_gpu=args.max_mem_per_gpu,
-        num_gpus=args.num_gpus,
+        num_gpus=None,
         device_ids=device_ids,
         offload_dir=offload_root,
     )
+    vae_model = vae_model.eval()
 
-    inferencer = InterleaveInferencer(
-        model=model,
-        vae_model=vae_model,
-        tokenizer=tokenizer,
-        vae_transform=vae_transform,
-        vit_transform=vit_transform,
-        new_token_ids=new_token_ids,
-    )
+    inferencer_cache: Dict[int, InterleaveInferencer] = {}
+    vae_cache: Dict[int, torch.nn.Module] = {}
+
+    def get_inferencer(device_id: int) -> InterleaveInferencer:
+        instance = inferencer_cache.get(device_id)
+        if instance is None:
+            if device_id not in vae_cache:
+                localized_vae = copy.deepcopy(vae_model).to(f"cuda:{device_id}").eval()
+                vae_cache[device_id] = localized_vae
+            instance = InterleaveInferencer(
+                model=model,
+                vae_model=vae_cache[device_id],
+                tokenizer=tokenizer,
+                vae_transform=vae_transform,
+                vit_transform=vit_transform,
+                new_token_ids=new_token_ids,
+            )
+            inferencer_cache[device_id] = instance
+        return instance
+
+    primary_inferencer = get_inferencer(diffusion_device)
+
+    if parallel_mode == ParallelMode.STAGED_DIFFUSION:
+        scheduler = build_scheduler(
+            ParallelMode.STAGED_DIFFUSION,
+            inferencer_factory=get_inferencer,
+            diffusion_device=diffusion_device,
+            decode_devices=decode_gpus,
+        )
+    else:
+        scheduler = build_scheduler(
+            ParallelMode.DATA_PARALLEL,
+            inferencer_factory=get_inferencer,
+            diffusion_device=diffusion_device,
+        )
 
     default_shape = tuple(args.default_shape)
 
@@ -138,90 +246,100 @@ def main() -> None:
         print(f"[rank {rank}] No tasks assigned to this rank.")
 
     summary_records: List[Tuple[int, Dict[str, Any]]] = []
-    overlap_enabled = args.overlap_text_diffusion
-    diffusion_executor: Optional[ThreadPoolExecutor] = None
-    diffusion_stream: Optional[torch.cuda.Stream] = None
-    pending_future: Optional[Future] = None
-    pending_info: Optional[Dict[str, Any]] = None
-    current_device = torch.cuda.current_device()
+    def finalize_text_results(results: List[TextToImageResult]) -> None:
+        for outcome in results:
+            if outcome.error:
+                raise RuntimeError(
+                    f"Text-to-image task '{outcome.task.task_id}' failed."
+                ) from outcome.error
+            image = outcome.image
+            if image is None:
+                raise RuntimeError(f"No image returned for task '{outcome.task.task_id}'")
+            image_path = ensure_path(outcome.task.output_image, outcome.task.task_id, output_dir, ".png")
+            image.save(image_path)
 
-    if overlap_enabled:
-        diffusion_executor = ThreadPoolExecutor(max_workers=1)
-        diffusion_stream = torch.cuda.Stream(device=current_device)
-
-    def finalize_pending() -> None:
-        nonlocal pending_future, pending_info
-        if pending_future is None or pending_info is None:
-            return
-        image = pending_future.result()
-        image.save(pending_info["image_path"])
-        summary_records.append(
-            (
-                pending_info["task_index"],
-                {
-                    "task_id": pending_info["task"].task_id,
-                    "type": pending_info["task"].kind,
-                    "prompt": pending_info["task"].prompt,
-                    "image_path": str(pending_info["image_path"]),
-                    "thinking_path": str(pending_info["thinking_path"]) if pending_info["thinking_path"] else None,
-                },
-            )
-        )
-        pending_future = None
-        pending_info = None
-
-    for local_idx, task_index in enumerate(assigned_indices, start=1):
-        task = tasks[task_index]
-        setup_seed(task.seed if task.seed is not None else args.seed)
-        global_position = task_index + 1
-        if distributed:
-            print(
-                f"[rank {rank}] [{local_idx}/{assigned_total}] (global {global_position}/{total_tasks}) "
-                f"Running task '{task.task_id}' ({task.kind})"
-            )
-        else:
-            print(f"[{global_position}/{total_tasks}] Running task '{task.task_id}' ({task.kind})")
-
-        if task.kind in {"text2image", "text-to-image"}:
-            if not task.prompt:
-                raise ValueError(f"Task '{task.task_id}' requires a prompt.")
-
-            if overlap_enabled:
-                plan, thinking = prepare_text_to_image_plan(inferencer, task, default_shape, args.enable_taylorseer)
-                image_path = ensure_path(task.output_image, task.task_id, output_dir, ".png")
-
-                thinking_path: Optional[Path] = None
-                if thinking:
-                    thinking_path = ensure_path(
-                        task.output_text,
-                        f"{task.task_id}_thinking",
-                        output_dir,
-                        ".txt",
-                    )
-                    thinking_path.write_text(thinking, encoding="utf-8")
-
-                finalize_pending()
-                assert diffusion_executor is not None
-                pending_future = diffusion_executor.submit(
-                    execute_diffusion_async,
-                    inferencer,
-                    plan,
-                    diffusion_stream,
-                    current_device,
+            thinking_path: Optional[Path] = None
+            if outcome.thinking_text:
+                thinking_path = ensure_path(
+                    outcome.task.output_text,
+                    f"{outcome.task.task_id}_thinking",
+                    output_dir,
+                    ".txt",
                 )
-                pending_info = {
-                    "task_index": task_index,
-                    "task": task,
-                    "image_path": image_path,
-                    "thinking_path": thinking_path,
-                }
+                thinking_path.write_text(outcome.thinking_text, encoding="utf-8")
+
+            summary_records.append(
+                (
+                    outcome.task_index,
+                    {
+                        "task_id": outcome.task.task_id,
+                        "type": outcome.task.kind,
+                        "prompt": outcome.task.prompt,
+                        "image_path": str(image_path),
+                        "thinking_path": str(thinking_path) if thinking_path else None,
+                    },
+                )
+            )
+
+    try:
+        for local_idx, task_index in enumerate(assigned_indices, start=1):
+            task = tasks[task_index]
+            setup_seed(task.seed if task.seed is not None else args.seed)
+            global_position = task_index + 1
+            if distributed:
+                print(
+                    f"[rank {rank}] [{local_idx}/{assigned_total}] (global {global_position}/{total_tasks}) "
+                    f"Running task '{task.task_id}' ({task.kind})"
+                )
             else:
-                result = run_text_to_image(inferencer, task, default_shape, args.enable_taylorseer)
-                image = result.get("image")
-                if image is None:
-                    raise RuntimeError(f"No image returned for task '{task.task_id}'")
-                image_path = ensure_path(task.output_image, task.task_id, output_dir, ".png")
-                image.save(image_path)
+                print(f"[{global_position}/{total_tasks}] Running task '{task.task_id}' ({task.kind})")
+
+            finalize_text_results(scheduler.poll())
+
+            if task.kind in {"text2image", "text-to-image"}:
+                if not task.prompt:
+                    raise ValueError(f"Task '{task.task_id}' requires a prompt.")
+
+                _, plan_kwargs = build_text_to_image_kwargs(task, default_shape, args.enable_taylorseer)
+                request = TextToImageRequest(
+                    task_index=task_index,
+                    task=task,
+                    prompt=task.prompt or "",
+                    think=task.think,
+                    plan_kwargs=plan_kwargs,
+                )
+                scheduler.submit_text_to_image(request)
+
+            elif task.kind in {"image_understanding", "image-understanding", "vlm"}:
+                finalize_text_results(scheduler.wait_all())
+                result = run_image_understanding(primary_inferencer, task)
+                text_output = result.get("text")
+                if not text_output:
+                    raise RuntimeError(f"No text returned for task '{task.task_id}'")
+                text_path = ensure_path(task.output_text, task.task_id, output_dir, ".txt")
+                text_path.write_text(text_output, encoding="utf-8")
+
+                summary_records.append(
+                    (
+                        task_index,
+                        {
+                            "task_id": task.task_id,
+                            "type": task.kind,
+                            "prompt": task.prompt,
+                            "image_path": str(task.image_path) if task.image_path else None,
+                            "text_path": str(text_path),
+                        },
+                    )
+                )
+
+            elif task.kind in {"image_editing", "image-editing", "editing"}:
+                finalize_text_results(scheduler.wait_all())
+                result = run_image_editing(primary_inferencer, task, args.enable_taylorseer)
+                edited_image = result.get("image")
+                if edited_image is None:
+                    raise RuntimeError(f"No edited image returned for task '{task.task_id}'")
+                image_path = ensure_path(task.output_image, f"{task.task_id}_edited", output_dir, ".png")
+                edited_image.save(image_path)
 
                 thinking = result.get("text")
                 thinking_path: Optional[Path] = None
@@ -241,77 +359,19 @@ def main() -> None:
                             "task_id": task.task_id,
                             "type": task.kind,
                             "prompt": task.prompt,
+                            "source_image_path": str(task.image_path) if task.image_path else None,
                             "image_path": str(image_path),
                             "thinking_path": str(thinking_path) if thinking_path else None,
                         },
                     )
                 )
 
-        elif task.kind in {"image_understanding", "image-understanding", "vlm"}:
-            if overlap_enabled:
-                finalize_pending()
-            result = run_image_understanding(inferencer, task)
-            text_output = result.get("text")
-            if not text_output:
-                raise RuntimeError(f"No text returned for task '{task.task_id}'")
-            text_path = ensure_path(task.output_text, task.task_id, output_dir, ".txt")
-            text_path.write_text(text_output, encoding="utf-8")
+            else:
+                raise ValueError(f"Unsupported task type '{task.kind}' in task '{task.task_id}'")
 
-            summary_records.append(
-                (
-                    task_index,
-                    {
-                        "task_id": task.task_id,
-                        "type": task.kind,
-                        "prompt": task.prompt,
-                        "image_path": str(task.image_path) if task.image_path else None,
-                        "text_path": str(text_path),
-                    },
-                )
-            )
-
-        elif task.kind in {"image_editing", "image-editing", "editing"}:
-            if overlap_enabled:
-                finalize_pending()
-            result = run_image_editing(inferencer, task, args.enable_taylorseer)
-            edited_image = result.get("image")
-            if edited_image is None:
-                raise RuntimeError(f"No edited image returned for task '{task.task_id}'")
-            image_path = ensure_path(task.output_image, f"{task.task_id}_edited", output_dir, ".png")
-            edited_image.save(image_path)
-
-            thinking = result.get("text")
-            thinking_path: Optional[Path] = None
-            if thinking:
-                thinking_path = ensure_path(
-                    task.output_text,
-                    f"{task.task_id}_thinking",
-                    output_dir,
-                    ".txt",
-                )
-                thinking_path.write_text(thinking, encoding="utf-8")
-
-            summary_records.append(
-                (
-                    task_index,
-                    {
-                        "task_id": task.task_id,
-                        "type": task.kind,
-                        "prompt": task.prompt,
-                        "source_image_path": str(task.image_path) if task.image_path else None,
-                        "image_path": str(image_path),
-                        "thinking_path": str(thinking_path) if thinking_path else None,
-                    },
-                )
-            )
-
-        else:
-            raise ValueError(f"Unsupported task type '{task.kind}' in task '{task.task_id}'")
-
-    if overlap_enabled:
-        finalize_pending()
-        if diffusion_executor is not None:
-            diffusion_executor.shutdown(wait=True)
+        finalize_text_results(scheduler.wait_all())
+    finally:
+        scheduler.shutdown()
 
     if distributed:
         gathered: List[List[Tuple[int, Dict[str, Any]]]] = [None] * world_size
@@ -329,6 +389,7 @@ def main() -> None:
             print(f"Completed {len(summary)} tasks. Summary written to {summary_path}")
         dist.barrier()
     else:
+        summary_records.sort(key=lambda item: item[0])
         summary = [entry for _, entry in summary_records]
         summary_path = output_dir / "summary.json"
         with summary_path.open("w", encoding="utf-8") as handle:
