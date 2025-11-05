@@ -209,6 +209,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    test=parse_args()
     args = parse_args()
     if args.poisson_lambda <= 0.0:
         raise ValueError("poisson_lambda must be > 0.")
