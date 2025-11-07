@@ -6,9 +6,11 @@ import random
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 import numpy as np
+import time
 import torch
+from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -17,7 +19,7 @@ if str(ROOT) not in sys.path:
 from accelerate import infer_auto_device_map, init_empty_weights, load_checkpoint_and_dispatch
 
 from data.data_utils import add_special_tokens, pil_img2rgb
-from inferencer import InterleaveInferencer
+from inferencer import InterleaveInferencer, TextToImagePlan
 from modeling.autoencoder import load_ae
 from modeling.bagel import (
     Bagel,
@@ -38,31 +40,18 @@ from add_batching_function import (
     run_image_understanding,
     setup_distributed,
     setup_seed,
-    
 )
-from scripts.scheduling import (
+from scripts.inference_serving.scheduling import (
     ParallelMode,
     TextToImageRequest,
     TextToImageResult,
     build_scheduler,
-    DiffusionTaskKind,
 )
+
 try:
     import yaml  # type: ignore
 except ImportError:  # pragma: no cover - pip requirement already present
     yaml = None
-
-
-def parse_device_list(value: Optional[str]) -> List[int]:
-    if value is None:
-        return []
-    devices: List[int] = []
-    for chunk in value.split(","):
-        chunk = chunk.strip()
-        if not chunk:
-            continue
-        devices.append(int(chunk))
-    return devices
 
 
 def parse_args() -> argparse.Namespace:
@@ -85,12 +74,6 @@ def parse_args() -> argparse.Namespace:
         help="Parallel scheduling strategy: data_parallel (sequential) or staged_diffusion (decode/diffusion split).",
     )
     parser.add_argument(
-        "--diffusion_batch_size",
-        type=int,
-        default=4,
-        help="Number of diffusion jobs to execute together on the diffusion GPU.",
-    )
-    parser.add_argument(
         "--diffusion_gpu",
         type=int,
         default=0,
@@ -102,7 +85,34 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Comma-separated GPU indices for text decoding workers in staged diffusion scheduling.",
     )
+    parser.add_argument(
+        "--overlap_text_diffusion",
+        action="store_true",
+        help="(Deprecated) Enable staged diffusion scheduling. Use --parallel_method=staged_diffusion instead.",
+    )
+    parser.add_argument(
+        "--batch_size_1024",
+        type=int,
+        default=4,
+        help="Diffusion batch size for 1024x1024 generations.",
+    )
+    parser.add_argument(
+        "--batch_size_768",
+        type=int,
+        default=4,
+        help="Diffusion batch size for 768x768 generations.",
+    )
+    parser.add_argument(
+        "--batch_size_512",
+        type=int,
+        default=4,
+        help="Diffusion batch size for 512x512 generations.",
+    )
     return parser.parse_args()
+
+
+TEXT_TO_IMAGE_KINDS = {"text2image", "text-to-image"}
+IMAGE_EDITING_KINDS = {"image_editing", "image-editing", "editing"}
 
 def main() -> None:
     args = parse_args()
@@ -131,7 +141,38 @@ def main() -> None:
             print("Staged diffusion scheduling is unavailable in distributed mode. Falling back to data_parallel.")
         parallel_mode = ParallelMode.DATA_PARALLEL
 
-    
+    def parse_device_list(value: Optional[str]) -> List[int]:
+        if value is None:
+            return []
+        devices: List[int] = []
+        for chunk in value.split(","):
+            chunk = chunk.strip()
+            if not chunk:
+                continue
+            devices.append(int(chunk))
+        return devices
+
+    def build_batch_size_resolver() -> Callable[[TextToImagePlan], int]:
+        def _clamp(value: int) -> int:
+            return max(1, int(value))
+
+        resolution_map = {
+            1024: _clamp(args.batch_size_1024),
+            768: _clamp(args.batch_size_768),
+            512: _clamp(args.batch_size_512),
+        }
+
+        def resolver(plan: TextToImagePlan) -> int:
+            shape = getattr(plan, "image_shape", None)
+            if shape is not None:
+                dims = [int(shape[0]), int(shape[1])]
+                for dim in dims:
+                    batch_size = resolution_map.get(dim)
+                    if batch_size and batch_size > 0:
+                        return batch_size
+            return 1
+
+        return resolver
 
     if distributed:
         if local_rank < 0 or local_rank >= available_gpus:
@@ -209,6 +250,7 @@ def main() -> None:
 
     inferencer_cache: Dict[int, InterleaveInferencer] = {}
     vae_cache: Dict[int, torch.nn.Module] = {}
+
     def get_inferencer(device_id: int) -> InterleaveInferencer:
         instance = inferencer_cache.get(device_id)
         if instance is None:
@@ -227,6 +269,7 @@ def main() -> None:
         return instance
 
     primary_inferencer = get_inferencer(diffusion_device)
+    batch_size_resolver = build_batch_size_resolver()
 
     if parallel_mode == ParallelMode.STAGED_DIFFUSION:
         scheduler = build_scheduler(
@@ -234,14 +277,16 @@ def main() -> None:
             inferencer_factory=get_inferencer,
             diffusion_device=diffusion_device,
             decode_devices=decode_gpus,
-            diffusion_batch_size=args.diffusion_batch_size,
+            default_batch_size=1,
+            batch_size_resolver=batch_size_resolver,
         )
     else:
         scheduler = build_scheduler(
             ParallelMode.DATA_PARALLEL,
             inferencer_factory=get_inferencer,
             diffusion_device=diffusion_device,
-            diffusion_batch_size=args.diffusion_batch_size,
+            default_batch_size=1,
+            batch_size_resolver=batch_size_resolver,
         )
 
     default_shape = tuple(args.default_shape)
@@ -252,20 +297,35 @@ def main() -> None:
         print(f"[rank {rank}] No tasks assigned to this rank.")
 
     summary_records: List[Tuple[int, Dict[str, Any]]] = []
-    editing_kinds = {"image_editing", "image-editing", "editing"}
+    generation_start: Optional[float] = None
+    generation_end: Optional[float] = None
 
+    def mark_generation_start() -> None:
+        nonlocal generation_start
+        if generation_start is None:
+            generation_start = time.perf_counter()
     def finalize_text_results(results: List[TextToImageResult]) -> None:
         for outcome in results:
             if outcome.error:
                 raise RuntimeError(
-                    f"Text-to-image task '{outcome.task.task_id}' failed."
+                    f"Diffusion task '{outcome.task.task_id}' failed."
                 ) from outcome.error
             image = outcome.image
             if image is None:
                 raise RuntimeError(f"No image returned for task '{outcome.task.task_id}'")
-            is_editing = outcome.task.kind in editing_kinds
-            default_name = f"{outcome.task.task_id}_edited" if is_editing else outcome.task.task_id
-            image_path = ensure_path(outcome.task.output_image, default_name, output_dir, ".png")
+
+            task_kind = (outcome.task.kind or "").lower()
+            if task_kind in TEXT_TO_IMAGE_KINDS:
+                image_path = ensure_path(outcome.task.output_image, outcome.task.task_id, output_dir, ".png")
+            elif task_kind in IMAGE_EDITING_KINDS:
+                image_path = ensure_path(
+                    outcome.task.output_image,
+                    f"{outcome.task.task_id}_edited",
+                    output_dir,
+                    ".png",
+                )
+            else:
+                image_path = ensure_path(outcome.task.output_image, outcome.task.task_id, output_dir, ".png")
             image.save(image_path)
 
             thinking_path: Optional[Path] = None
@@ -278,16 +338,22 @@ def main() -> None:
                 )
                 thinking_path.write_text(outcome.thinking_text, encoding="utf-8")
 
-            payload: Dict[str, Any] = {
+            summary_payload: Dict[str, Any] = {
                 "task_id": outcome.task.task_id,
                 "type": outcome.task.kind,
                 "prompt": outcome.task.prompt,
                 "image_path": str(image_path),
                 "thinking_path": str(thinking_path) if thinking_path else None,
             }
-            if is_editing:
-                payload["source_image_path"] = str(outcome.task.image_path) if outcome.task.image_path else None
-            summary_records.append((outcome.task_index, payload))
+            if task_kind in IMAGE_EDITING_KINDS:
+                summary_payload["source_image_path"] = str(outcome.task.image_path) if outcome.task.image_path else None
+
+            summary_records.append(
+                (
+                    outcome.task_index,
+                    summary_payload,
+                )
+            )
 
     try:
         for local_idx, task_index in enumerate(assigned_indices, start=1):
@@ -303,22 +369,31 @@ def main() -> None:
                 print(f"[{global_position}/{total_tasks}] Running task '{task.task_id}' ({task.kind})")
 
             finalize_text_results(scheduler.poll())
+            task_kind = (task.kind or "").lower()
 
-            if task.kind in {"text2image", "text-to-image"}:
+            if task_kind in TEXT_TO_IMAGE_KINDS:
                 if not task.prompt:
                     raise ValueError(f"Task '{task.task_id}' requires a prompt.")
 
                 _, plan_kwargs = build_text_to_image_kwargs(task, default_shape, args.enable_taylorseer)
+                prompt_text = task.prompt or ""
+                think_flag = bool(task.think)
+                plan_kwargs = dict(plan_kwargs)
+
+                mark_generation_start()
                 request = TextToImageRequest(
                     task_index=task_index,
                     task=task,
-                    prompt=task.prompt or "",
-                    think=task.think,
-                    plan_kwargs=plan_kwargs,
+                    build_plan=lambda inferencer, device_id, prompt=prompt_text, think=think_flag, kwargs=plan_kwargs: inferencer.prepare_text_to_image(
+                        prompt,
+                        think=think,
+                        device_id=device_id,
+                        **kwargs,
+                    ),
                 )
                 scheduler.submit_text_to_image(request)
 
-            elif task.kind in {"image_understanding", "image-understanding", "vlm"}:
+            elif task_kind in {"image_understanding", "image-understanding", "vlm"}:
                 finalize_text_results(scheduler.wait_all())
                 result = run_image_understanding(primary_inferencer, task)
                 text_output = result.get("text")
@@ -340,16 +415,44 @@ def main() -> None:
                     )
                 )
 
-            elif task.kind in {"image_editing", "image-editing", "editing"}:
-                plan_kwargs = build_image_editing_kwargs(task, args.enable_taylorseer)
+            elif task_kind in IMAGE_EDITING_KINDS:
+                _, plan_kwargs = build_image_editing_kwargs(task, args.enable_taylorseer)
+                plan_kwargs = dict(plan_kwargs)
+                image_path = plan_kwargs.pop("image_path")
+                prompt_text = task.prompt or ""
+                think_flag = bool(task.think)
+
+                def _build_edit_plan(
+                    inferencer: InterleaveInferencer,
+                    device_id: int,
+                    *,
+                    prompt: str,
+                    think: bool,
+                    kwargs: Dict[str, Any],
+                    source_image: Path,
+                ) -> Tuple[TextToImagePlan, Optional[str]]:
+                    with Image.open(source_image) as image:
+                        image = image.convert("RGB")
+                        return inferencer.prepare_image_editing(
+                            image=image,
+                            prompt=prompt,
+                            think=think,
+                            device_id=device_id,
+                            **kwargs,
+                        )
+
+                mark_generation_start()
                 request = TextToImageRequest(
                     task_index=task_index,
                     task=task,
-                    prompt=task.prompt or "",
-                    think=task.think,
-                    plan_kwargs=plan_kwargs,
-                    kind=DiffusionTaskKind.IMAGE_EDITING.value,
-                    image_path=task.image_path,
+                    build_plan=lambda inferencer, device_id, prompt=prompt_text, think=think_flag, kwargs=plan_kwargs, src=image_path: _build_edit_plan(
+                        inferencer,
+                        device_id,
+                        prompt=prompt,
+                        think=think,
+                        kwargs=kwargs,
+                        source_image=src,
+                    ),
                 )
                 scheduler.submit_text_to_image(request)
 
@@ -357,6 +460,8 @@ def main() -> None:
                 raise ValueError(f"Unsupported task type '{task.kind}' in task '{task.task_id}'")
 
         finalize_text_results(scheduler.wait_all())
+        if generation_start is not None and generation_end is None:
+            generation_end = time.perf_counter()
     finally:
         scheduler.shutdown()
 
@@ -383,9 +488,17 @@ def main() -> None:
             json.dump(summary, handle, indent=2, ensure_ascii=False)
         print(f"Completed {len(summary)} tasks. Summary written to {summary_path}")
 
+    if generation_start is not None and generation_end is not None:
+        elapsed = generation_end - generation_start
+        message = f"Generation time (requests): {elapsed:.2f} seconds"
+        if distributed:
+            print(f"[rank {rank}] {message}")
+        else:
+            print(message)
+
     if dist.is_initialized():
         dist.destroy_process_group()
-
+        
 
 
 if __name__ == "__main__":

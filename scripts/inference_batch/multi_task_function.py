@@ -50,6 +50,7 @@ class TaskSpec:
     think: bool = False
     seed: Optional[int] = None
     params: Optional[Dict[str, Any]] = None
+    image_shape: Optional[Tuple[int, int]] = None
 
     def __post_init__(self) -> None:
         if self.params is None:
@@ -100,6 +101,13 @@ def parse_task_payload(
     output_image_path = Path(output_image).expanduser().resolve() if output_image else None
     output_text_path = Path(output_text).expanduser().resolve() if output_text else None
 
+    raw_shape = payload.get("shape")
+    image_shape: Optional[Tuple[int, int]] = None
+    if raw_shape is not None:
+        if not isinstance(raw_shape, (list, tuple)) or len(raw_shape) != 2:
+            raise ValueError(f"`shape` must be a pair of integers, received: {raw_shape}")
+        image_shape = (int(raw_shape[0]), int(raw_shape[1]))
+
     return TaskSpec(
         task_id=task_id,
         kind=kind,
@@ -110,6 +118,7 @@ def parse_task_payload(
         think=bool(payload.get("think", False)),
         seed=payload.get("seed"),
         params=payload.get("params"),
+        image_shape=image_shape,
     )
 
 
@@ -180,7 +189,9 @@ def build_text_to_image_kwargs(
     enable_taylorseer: bool,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     params = dict(task.params or {})
-    shape = tuple(params.pop("image_shape", params.pop("image_shapes", default_shape)))
+    shape_source: Tuple[int, int] = task.image_shape or default_shape
+    shape_value = params.pop("image_shape", params.pop("image_shapes", shape_source))
+    shape = tuple(int(dim) for dim in shape_value)
     if len(shape) != 2:
         raise ValueError(f"image_shape must be [H, W], received: {shape}")
 
@@ -215,18 +226,7 @@ def build_text_to_image_kwargs(
     return call_kwargs, plan_kwargs
 
 
-def run_text_to_image(
-    inferencer: InterleaveInferencer,
-    task: TaskSpec,
-    default_shape: Tuple[int, int],
-    enable_taylorseer: bool,
-) -> Dict[str, Any]:
-    call_kwargs, _ = build_text_to_image_kwargs(task, default_shape, enable_taylorseer)
-    result = inferencer(text=task.prompt or "", think=task.think, **call_kwargs)
-    return result
-
-
-def run_image_editing(inferencer: InterleaveInferencer, task: TaskSpec, enable_taylorseer: bool) -> Dict[str, Any]:
+def build_image_editing_kwargs(task: TaskSpec, enable_taylorseer: bool) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     if task.image_path is None:
         raise ValueError(f"Task '{task.task_id}' requires an `image` field.")
     if not task.image_path.exists():
@@ -248,7 +248,7 @@ def run_image_editing(inferencer: InterleaveInferencer, task: TaskSpec, enable_t
         text_temperature=params.pop("text_temperature", 1.0),
         cfg_text_scale=params.pop("cfg_text_scale", 4.0),
         cfg_img_scale=params.pop("cfg_img_scale", 2.0),
-        cfg_interval=cfg_interval,
+        cfg_interval=tuple(cfg_interval),
         timestep_shift=params.pop("timestep_shift", 3.0),
         num_timesteps=params.pop("num_timesteps", 50),
         cfg_renorm_min=params.pop("cfg_renorm_min", 0.0),
@@ -258,6 +258,26 @@ def run_image_editing(inferencer: InterleaveInferencer, task: TaskSpec, enable_t
 
     if params:
         raise ValueError(f"Unsupported parameters for image-editing task: {params}")
+
+    plan_kwargs = dict(inference_kwargs)
+    plan_kwargs["image_path"] = task.image_path
+
+    return inference_kwargs, plan_kwargs
+
+
+def run_text_to_image(
+    inferencer: InterleaveInferencer,
+    task: TaskSpec,
+    default_shape: Tuple[int, int],
+    enable_taylorseer: bool,
+) -> Dict[str, Any]:
+    call_kwargs, _ = build_text_to_image_kwargs(task, default_shape, enable_taylorseer)
+    result = inferencer(text=task.prompt or "", think=task.think, **call_kwargs)
+    return result
+
+
+def run_image_editing(inferencer: InterleaveInferencer, task: TaskSpec, enable_taylorseer: bool) -> Dict[str, Any]:
+    inference_kwargs, _ = build_image_editing_kwargs(task, enable_taylorseer)
 
     with Image.open(task.image_path) as image:
         image = image.convert("RGB")

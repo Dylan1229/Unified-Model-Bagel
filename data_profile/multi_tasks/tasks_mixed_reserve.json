@@ -1,0 +1,69 @@
+[
+  {
+    "task_id": "edit_octupusy_Replace_the_octopus",
+    "type": "image_editing",
+    "prompt": "Replace the octopus's background with an underwater coral scene.",
+    "image": "./data_profile/images/octupusy.jpg",
+    "think": true
+  },
+  {
+    "task_id": "edit_room_Add_sunlight_coming",
+    "type": "image_editing",
+    "prompt": "Add sunlight coming through the window and a cozy plant to this room.",
+    "image": "./data_profile/images/room.jpg",
+    "think": true
+  },
+  {
+    "task_id": "v1_217_The_diagram_below_sh",
+    "type": "image_understanding",
+    "prompt": "The diagram below shows how the Australian Bureau of Meteorology collects up-to-the-minute information on the weather in order to produce reliable forecasts.\\n\\nWrite a report for a university lecturer describing the information shown below. \\n\\nYou should write at least 150 words.",
+    "image": "./data_profile/images/understand_long/v1_217.png",
+    "think": true
+  },
+  {
+    "task_id": "v1_216_The_map_below_is_of",
+    "type": "image_understanding",
+    "prompt": "The map below is of the town of Garlsdon. A new supermarket (S) is planned for the town. The map shows two possible sites for the supermarket.\\n\\nSummarise the information by selecting and reporting the main features, and make comparisons where relevant. \\n\\nYou should write at least 150 words.",
+    "image": "./data_profile/images/understand_long/v1_216.png",
+    "think": true
+  },
+  {
+    "task_id": "v1_213_The_table_below_give",
+    "type": "image_understanding",
+    "prompt": "The table below gives information on consumer spending on different items in five different countries in 2002.\\n\\nSummarise the information by selecting and reporting the main features, and make comparisons where relevant.\\n\\nYou should write at least 150 words.",
+    "image": "./data_profile/images/understand_long/v1_213.jpg",
+    "think": true
+  },
+  {
+    "task_id": "edit_bike_Make_the_dog_wear_su",
+    "type": "image_editing",
+    "prompt": "Make the dog wear sunglasses and the cat wear a hat while riding the bike.",
+    "image": "./data_profile/images/bike.jpg",
+    "think": true
+  },
+  {
+    "task_id": "An_ultra-realistic_portrait_of_an_elderl",
+    "type": "text2image",
+    "prompt": "An ultra-realistic portrait of an elderly explorer sitting by a campfire in a snowy tundra. His weathered face is illuminated by the soft orange glow of the flames, while behind him stretches an endless frozen landscape dotted with auroras. His jacket is torn but covered with patches from past expeditions. Steam rises from a metal mug in his hand as snowflakes drift gently through the air. The depth of field isolates his face while keeping the background softly blurred. The scene conveys loneliness, wisdom, and survival. Around him are scattered relics from his journeys: a cracked compass, old photographs, a notebook filled with sketches of forgotten civilizations. His eyes reflect both fatigue and serenity, mirroring the dance of northern lights above. The camera angle is slightly low, emphasizing his resilience against nature’s vastness. The mood is cinematic and intimate, blending cold blue tones with the warmth of the fire. Rendered with subsurface scattering, microdisplacement for fabric texture, cinematic grain, full-frame color science, volumetric snow simulation, and dynamic range optimized for HDR10 output.",
+    "think": true
+  },
+  {
+    "task_id": "A_breathtaking_panorama_of_a_coastal_vil",
+    "type": "text2image",
+    "prompt": "A breathtaking panorama of a coastal village on an alien planet, where the ocean glows turquoise under three moons. Bioluminescent plants cover the cliffs, and small houses with domed glass roofs are scattered along winding paths. Alien birds with transparent wings fly across the sky as fishermen steer floating rafts powered by energy crystals. The air shimmers with heat and color, blending realism with dreamlike abstraction. The composition is cinematic, using aerial perspective and detailed reflections on the water. In the distance, a colossal ringed gas giant fills the horizon, casting faint blue light over the shore. Children play near the waves, their laughter echoing across the alien sea. Each detail reflects a thriving civilization that has learned to coexist with nature—temples carved into coral, wind-powered turbines shaped like seashells, and glowing runes embedded in the sand. The sky transitions from violet to amber as night approaches, and countless drones emerge from beneath the surface to harvest energy from the tides. The visual palette mixes the realism of high-end concept art with the surreal tones of a dream. Inspired by cinematic works of Ridley Scott and Denis Villeneuve, rendered with full path tracing, atmospheric scattering, and adaptive light transport for hyperreal depth and immersion.",
+    "think": true
+  },
+  {
+    "task_id": "A_wide-angle_view_of_an_ancient_library",
+    "type": "text2image",
+    "prompt": "A wide-angle view of an ancient library built inside a mountain cave, with thousands of floating books glowing faintly in midair. Warm candlelight flickers across carved stone pillars and golden statues of mythical scholars. In the center, a lone monk sits cross-legged on a circular platform, meditating while pages swirl around him like a storm. The scene combines fantasy and realism, with realistic subsurface scattering on the marble floor, volumetric dust particles in the air, and dynamic lighting creating a mystical atmosphere. Rendered in the style of a 19th century oil painting with cinematic color grading and ultra-high resolution textures.",
+    "think": true
+  },
+  {
+    "task_id": "v1_215_Chorleywood_is_a_vil",
+    "type": "image_understanding",
+    "prompt": "Chorleywood is a village near London whose population has increased steadily since the middle of the nineteenth century. The map below shows the development of the village.\\n\\nWrite a report for a university lecturer describing the development of the village. \\n\\nYou should write at least 150 words.",
+    "image": "./data_profile/images/understand_long/v1_215.jpg",
+    "think": true
+  }
+]

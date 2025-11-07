@@ -802,6 +802,15 @@ class Bagel(PreTrainedModel):
         assert timestep.unique().shape[0] == 1
         packed_pos_embed = self.latent_pos_embed(packed_vae_position_ids)
         packed_timestep_embeds = self.time_embedder(timestep)
+
+        vae2llm_dtype = self.vae2llm.weight.dtype
+        if x_t.dtype != vae2llm_dtype:
+            x_t = x_t.to(dtype=vae2llm_dtype)
+        if packed_timestep_embeds.dtype != vae2llm_dtype:
+            packed_timestep_embeds = packed_timestep_embeds.to(dtype=vae2llm_dtype)
+        if packed_pos_embed.dtype != vae2llm_dtype:
+            packed_pos_embed = packed_pos_embed.to(dtype=vae2llm_dtype)
+
         x_t = self.vae2llm(x_t) + packed_timestep_embeds + packed_pos_embed
         if x_t.dtype != packed_sequence.dtype:
             x_t = x_t.to(packed_sequence.dtype)

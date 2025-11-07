@@ -47,9 +47,34 @@ class TextToImagePlan:
             self.cfg_img_context.to_device_dict(device),
         )
 
-    def diffusion_signature(self) -> Tuple[Tuple[str, Any], ...]:
-        """Deterministic signature that can be used for batching compatibility checks."""
-        return tuple(sorted(self.diffusion_kwargs.items()))
+
+def _merge_cached_contexts(contexts: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    if not contexts:
+        raise ValueError("At least one cached context is required.")
+    kv_lens: List[int] = []
+    ropes: List[int] = []
+    template_cache: NaiveCache = contexts[0]["past_key_values"]
+    merged_cache = NaiveCache(template_cache.num_layers)
+
+    for ctx in contexts:
+        kv_lens.extend(int(x) for x in ctx["kv_lens"])
+        ropes.extend(int(x) for x in ctx["ropes"])
+
+    for layer_idx in range(merged_cache.num_layers):
+        merged_keys: List[torch.Tensor] = []
+        merged_values: List[torch.Tensor] = []
+        for ctx in contexts:
+            cache = ctx["past_key_values"]
+            key_tensor = cache.key_cache[layer_idx]
+            value_tensor = cache.value_cache[layer_idx]
+            if key_tensor is not None:
+                merged_keys.append(key_tensor)
+            if value_tensor is not None:
+                merged_values.append(value_tensor)
+        merged_cache.key_cache[layer_idx] = torch.cat(merged_keys, dim=0) if merged_keys else None
+        merged_cache.value_cache[layer_idx] = torch.cat(merged_values, dim=0) if merged_values else None
+
+    return {"kv_lens": kv_lens, "ropes": ropes, "past_key_values": merged_cache}
 
 
 def _clone_naive_cache(cache: NaiveCache) -> NaiveCache:
@@ -97,56 +122,6 @@ class InterleaveInferencer:
         self.vae_transform = vae_transform
         self.vit_transform = vit_transform
         self.new_token_ids = new_token_ids
-
-    @staticmethod
-    def _normalize_image_shapes(
-        image_shapes: Union[Tuple[int, int], Sequence[Tuple[int, int]]],
-    ) -> List[Tuple[int, int]]:
-        if isinstance(image_shapes, tuple) and len(image_shapes) == 2:
-            return [tuple(int(dim) for dim in image_shapes)]
-        if isinstance(image_shapes, list) and image_shapes and isinstance(image_shapes[0], (list, tuple)):
-            return [tuple(int(dim) for dim in shape) for shape in image_shapes]
-        if isinstance(image_shapes, tuple) and image_shapes and isinstance(image_shapes[0], (list, tuple)):
-            return [tuple(int(dim) for dim in shape) for shape in image_shapes]
-        raise ValueError(f"Unsupported image_shapes specification: {image_shapes}")
-
-    @staticmethod
-    def _concat_naive_caches(caches: Sequence[NaiveCache]) -> NaiveCache:
-        assert caches, "At least one cache is required for concatenation."
-        num_layers = caches[0].num_layers
-        merged = NaiveCache(num_layers)
-        for layer_idx in range(num_layers):
-            key_chunks: List[torch.Tensor] = []
-            value_chunks: List[torch.Tensor] = []
-            for cache in caches:
-                key = cache.key_cache[layer_idx]
-                value = cache.value_cache[layer_idx]
-                if key is None or key.shape[0] == 0:
-                    continue
-                key_chunks.append(key)
-                value_chunks.append(value)
-            if key_chunks:
-                merged.key_cache[layer_idx] = torch.cat(key_chunks, dim=0)
-                merged.value_cache[layer_idx] = torch.cat(value_chunks, dim=0)
-            else:
-                merged.key_cache[layer_idx] = None
-                merged.value_cache[layer_idx] = None
-        return merged
-
-    @classmethod
-    def _merge_context_dicts(cls, contexts: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
-        kv_lens: List[int] = []
-        ropes: List[int] = []
-        caches: List[NaiveCache] = []
-        for ctx in contexts:
-            kv_lens.extend(int(v) for v in ctx["kv_lens"])
-            ropes.extend(int(v) for v in ctx["ropes"])
-            caches.append(ctx["past_key_values"])
-        return {
-            "kv_lens": kv_lens,
-            "ropes": ropes,
-            "past_key_values": cls._concat_naive_caches(caches),
-        }
 
     def _ensure_vae_device(self, device: torch.device) -> None:
         try:
@@ -237,7 +212,7 @@ class InterleaveInferencer:
     @torch.no_grad()
     def gen_image(
         self, 
-        image_shapes, 
+        image_shape, 
         gen_context, 
         cfg_text_scale=4.0,
         cfg_img_scale=1.5,
@@ -252,9 +227,8 @@ class InterleaveInferencer:
         timestep_shift=3.0,
         enable_taylorseer=False,
     ):
-        image_shape_list = self._normalize_image_shapes(image_shapes)
-        single_image = len(image_shape_list) == 1
-
+        # print(cfg_renorm_type)
+        # torch.cuda.nvtx.range_push("Prepare Latent & CFG")
         past_key_values = gen_context['past_key_values']
         kv_lens = gen_context['kv_lens']
         ropes = gen_context['ropes']
@@ -262,7 +236,7 @@ class InterleaveInferencer:
         generation_input = self.model.prepare_vae_latent(
             curr_kvlens=kv_lens,
             curr_rope=ropes, 
-            image_sizes=image_shape_list, 
+            image_sizes=[image_shape], 
             new_token_ids=self.new_token_ids,
         )
         generation_input = {
@@ -277,7 +251,7 @@ class InterleaveInferencer:
         generation_input_cfg_text = self.model.prepare_vae_latent_cfg(
             curr_kvlens=kv_lens_cfg,
             curr_rope=ropes_cfg, 
-            image_sizes=image_shape_list, 
+            image_sizes=[image_shape], 
         )
         generation_input_cfg_text = {
             key: value.to(device=device, non_blocking=True) if isinstance(value, torch.Tensor) else value
@@ -291,7 +265,7 @@ class InterleaveInferencer:
         generation_input_cfg_img = self.model.prepare_vae_latent_cfg(
             curr_kvlens=kv_lens_cfg,
             curr_rope=ropes_cfg, 
-            image_sizes=image_shape_list, 
+            image_sizes=[image_shape], 
         )
         generation_input_cfg_img = {
             key: value.to(device=device, non_blocking=True) if isinstance(value, torch.Tensor) else value
@@ -323,9 +297,9 @@ class InterleaveInferencer:
         )
         torch.cuda.nvtx.range_pop()
         torch.cuda.nvtx.range_push("VAE Decode")
-        images = [self.decode_image(latent, shape) for latent, shape in zip(unpacked_latent, image_shape_list)]
+        image = self.decode_image(unpacked_latent[0], image_shape)
         torch.cuda.nvtx.range_pop()
-        return images[0] if single_image else images
+        return image
 
         
     def decode_image(self, latent, image_shape):
@@ -574,6 +548,7 @@ class InterleaveInferencer:
             torch.cuda.set_device(previous_device)
         return plan, thinking_text
 
+    @torch.no_grad()
     def prepare_image_editing(
         self,
         image: Image.Image,
@@ -601,22 +576,21 @@ class InterleaveInferencer:
         target_device = torch.device("cuda", torch.cuda.current_device())
         self._ensure_vae_device(target_device)
 
-        processed_image = self.vae_transform.resize_transform(pil_img2rgb(image.convert("RGB")))
-        image_shape = processed_image.size[::-1]
-
         gen_context = self.init_gen_context()
         cfg_text_context = deepcopy(gen_context)
         cfg_img_context = deepcopy(gen_context)
         thinking_text: Optional[str] = None
+
+        processed_image = self.vae_transform.resize_transform(pil_img2rgb(image.convert("RGB")))
+        image_shape = processed_image.size[::-1]
 
         with torch.autocast(device_type="cuda", enabled=True, dtype=torch.bfloat16):
             if think:
                 gen_context = self.update_context_text(GEN_THINK_SYSTEM_PROMPT, gen_context)
                 cfg_img_context = self.update_context_text(GEN_THINK_SYSTEM_PROMPT, cfg_img_context)
 
-            gen_context = self.update_context_image(processed_image, gen_context, vae=True)
+            gen_context = self.update_context_image(processed_image, gen_context)
             cfg_text_context = deepcopy(gen_context)
-
             gen_context = self.update_context_text(prompt, gen_context)
             cfg_img_context = self.update_context_text(prompt, cfg_img_context)
 
@@ -656,34 +630,16 @@ class InterleaveInferencer:
         plan: TextToImagePlan,
         device_id: Optional[int] = None,
     ) -> Image.Image:
-        if device_id is None:
-            device_id = torch.cuda.current_device()
-        previous_device = torch.cuda.current_device()
-        if previous_device != device_id:
-            torch.cuda.set_device(device_id)
-        target_device = torch.device("cuda", device_id)
-        self._ensure_vae_device(target_device)
-        gen_context, cfg_text_context, cfg_img_context = plan.contexts_for_device(target_device)
-        image = self.gen_image(
-            plan.image_shape,
-            gen_context,
-            cfg_text_precontext=cfg_text_context,
-            cfg_img_precontext=cfg_img_context,
-            **plan.diffusion_kwargs,
-        )
-        if previous_device != device_id:
-            torch.cuda.set_device(previous_device)
-        return image
+        return self.render_text_to_image_plans([plan], device_id=device_id)[0]
 
-    def render_text_to_image_plan_batch(
+    @torch.no_grad()
+    def render_text_to_image_plans(
         self,
         plans: Sequence[TextToImagePlan],
         device_id: Optional[int] = None,
     ) -> List[Image.Image]:
         if not plans:
             return []
-        if len(plans) == 1:
-            return [self.render_text_to_image_plan(plans[0], device_id=device_id)]
         if device_id is None:
             device_id = torch.cuda.current_device()
         previous_device = torch.cuda.current_device()
@@ -692,24 +648,100 @@ class InterleaveInferencer:
         target_device = torch.device("cuda", device_id)
         self._ensure_vae_device(target_device)
 
-        reference_signature = plans[0].diffusion_signature()
-        for plan in plans[1:]:
-            if plan.diffusion_signature() != reference_signature:
-                raise ValueError("All plans within a batch must share identical diffusion kwargs.")
-
-        image_shapes = [plan.image_shape for plan in plans]
         contexts = [plan.contexts_for_device(target_device) for plan in plans]
-        gen_contexts = [ctx[0] for ctx in contexts]
-        cfg_text_contexts = [ctx[1] for ctx in contexts]
-        cfg_img_contexts = [ctx[2] for ctx in contexts]
+        gen_context = _merge_cached_contexts([ctx[0] for ctx in contexts])
+        cfg_text_context = _merge_cached_contexts([ctx[1] for ctx in contexts])
+        cfg_img_context = _merge_cached_contexts([ctx[2] for ctx in contexts])
 
-        batched_images = self.gen_image(
-            image_shapes,
-            self._merge_context_dicts(gen_contexts),
-            cfg_text_precontext=self._merge_context_dicts(cfg_text_contexts),
-            cfg_img_precontext=self._merge_context_dicts(cfg_img_contexts),
-            **plans[0].diffusion_kwargs,
+        base_kwargs = plans[0].diffusion_kwargs
+        for plan in plans[1:]:
+            if plan.diffusion_kwargs != base_kwargs:
+                raise ValueError("All plans in a batch must share the same diffusion parameters.")
+
+        images = self._gen_images_batch(
+            [plan.image_shape for plan in plans],
+            gen_context,
+            cfg_text_context,
+            cfg_img_context,
+            base_kwargs,
         )
         if previous_device != device_id:
             torch.cuda.set_device(previous_device)
-        return batched_images if isinstance(batched_images, list) else [batched_images]
+        return images
+
+    @torch.no_grad()
+    def _gen_images_batch(
+        self,
+        image_shapes: Sequence[Tuple[int, int]],
+        gen_context: Dict[str, Any],
+        cfg_text_precontext: Dict[str, Any],
+        cfg_img_precontext: Dict[str, Any],
+        diffusion_kwargs: Dict[str, Any],
+    ) -> List[Image.Image]:
+        past_key_values = gen_context["past_key_values"]
+        kv_lens = gen_context["kv_lens"]
+        ropes = gen_context["ropes"]
+        device = torch.device("cuda", torch.cuda.current_device())
+        generation_input = self.model.prepare_vae_latent(
+            curr_kvlens=kv_lens,
+            curr_rope=ropes,
+            image_sizes=list(image_shapes),
+            new_token_ids=self.new_token_ids,
+        )
+        generation_input = {
+            key: value.to(device=device, non_blocking=True) if isinstance(value, torch.Tensor) else value
+            for key, value in generation_input.items()
+        }
+
+        cfg_text_past_key_values = cfg_text_precontext["past_key_values"]
+        cfg_text_input = self.model.prepare_vae_latent_cfg(
+            curr_kvlens=cfg_text_precontext["kv_lens"],
+            curr_rope=cfg_text_precontext["ropes"],
+            image_sizes=list(image_shapes),
+        )
+        cfg_text_input = {
+            key: value.to(device=device, non_blocking=True) if isinstance(value, torch.Tensor) else value
+            for key, value in cfg_text_input.items()
+        }
+
+        cfg_img_past_key_values = cfg_img_precontext["past_key_values"]
+        cfg_img_input = self.model.prepare_vae_latent_cfg(
+            curr_kvlens=cfg_img_precontext["kv_lens"],
+            curr_rope=cfg_img_precontext["ropes"],
+            image_sizes=list(image_shapes),
+        )
+        cfg_img_input = {
+            key: value.to(device=device, non_blocking=True) if isinstance(value, torch.Tensor) else value
+            for key, value in cfg_img_input.items()
+        }
+
+        torch.cuda.nvtx.range_push("Diffusion Process (batched)")
+        unpacked_latent = self.model.generate_image(
+            past_key_values=past_key_values,
+            cfg_text_past_key_values=cfg_text_past_key_values,
+            cfg_img_past_key_values=cfg_img_past_key_values,
+            **generation_input,
+            cfg_text_scale=diffusion_kwargs["cfg_text_scale"],
+            cfg_img_scale=diffusion_kwargs["cfg_img_scale"],
+            cfg_interval=diffusion_kwargs["cfg_interval"],
+            cfg_renorm_min=diffusion_kwargs["cfg_renorm_min"],
+            cfg_renorm_type=diffusion_kwargs["cfg_renorm_type"],
+            timestep_shift=diffusion_kwargs["timestep_shift"],
+            num_timesteps=diffusion_kwargs["num_timesteps"],
+            cfg_text_packed_position_ids=cfg_text_input["cfg_packed_position_ids"],
+            cfg_text_packed_query_indexes=cfg_text_input["cfg_packed_query_indexes"],
+            cfg_text_key_values_lens=cfg_text_input["cfg_key_values_lens"],
+            cfg_text_packed_key_value_indexes=cfg_text_input["cfg_packed_key_value_indexes"],
+            cfg_img_packed_position_ids=cfg_img_input["cfg_packed_position_ids"],
+            cfg_img_packed_query_indexes=cfg_img_input["cfg_packed_query_indexes"],
+            cfg_img_key_values_lens=cfg_img_input["cfg_key_values_lens"],
+            cfg_img_packed_key_value_indexes=cfg_img_input["cfg_packed_key_value_indexes"],
+            enable_taylorseer=diffusion_kwargs["enable_taylorseer"],
+        )
+        torch.cuda.nvtx.range_pop()
+        images: List[Image.Image] = []
+        torch.cuda.nvtx.range_push("VAE Decode (batched)")
+        for latent, image_shape in zip(unpacked_latent, image_shapes):
+            images.append(self.decode_image(latent, image_shape))
+        torch.cuda.nvtx.range_pop()
+        return images
