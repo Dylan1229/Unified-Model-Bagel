@@ -14,7 +14,7 @@ nsys profile \
   --force-overwrite=true \
   --stats=true \
   --cuda-memory-usage=true \
-  python ./scripts/inference_batch/image_editing_batch.py \
+  python ./scripts/inference_multi/image_editing_batch.py \
     --model_path ./models/BAGEL-7B-MoT \
     --prompt_pth ./data_profile/prompt/editing.csv \
     --output ./results/image_editing \

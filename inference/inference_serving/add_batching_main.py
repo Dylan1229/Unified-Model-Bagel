@@ -32,7 +32,7 @@ from add_batching_function import (
     run_image_understanding,
     TEXT_TO_IMAGE_KINDS,
 )
-from scripts.inference_serving.scheduling import (
+from inference.inference_serving.scheduling import (
     ParallelMode,
     TextToImageRequest,
     TextToImageResult,

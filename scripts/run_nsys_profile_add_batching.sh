@@ -7,7 +7,7 @@ fi
 
 cd $project_root
 nsys profile \
-  -o ./results/reports/nsys/nsys_profile_batching_one_gpu \
+  -o ./results/reports/nsys/nsys_profile_batching \
   --trace=cuda,nvtx,osrt,cudnn \
   --python-sampling=true \
   --sample=cpu \
@@ -19,7 +19,7 @@ nsys profile \
     --tasks ./data_profile/multi_tasks/tasks_mixed.json \
     --output ./results/multi_tasks \
     --seed 42 \
-    --parallel_method data_parallel \
+    --parallel_mode data_parallel \
     --batch_size_1024 4 \
     --batch_size_768 4 \
     --batch_size_512 4

@@ -13,10 +13,28 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from inferencer import InterleaveInferencer
-import torch.distributed as dist
+from accelerate import infer_auto_device_map, init_empty_weights, load_checkpoint_and_dispatch
 
-from scripts.utils.utils import(
+from data.data_utils import add_special_tokens, pil_img2rgb
+from inferencer import InterleaveInferencer
+from modeling.autoencoder import load_ae
+from modeling.bagel import (
+    Bagel,
+    BagelConfig,
+    Qwen2Config,
+    Qwen2ForCausalLM,
+    SiglipVisionConfig,
+    SiglipVisionModel,
+)
+from modeling.qwen2 import Qwen2Tokenizer
+import torch.distributed as dist
+from multi_task_function import (
+    build_image_editing_kwargs,
+    build_text_to_image_kwargs,
+    run_image_understanding
+)
+
+from inference.utils.utils import(
     setup_seed,
     setup_distributed,
     load_model,
@@ -25,19 +43,16 @@ from scripts.utils.utils import(
     ensure_path
 )
 
-from add_batching_function import (
-    build_image_editing_kwargs,
-    build_text_to_image_kwargs,
-    IMAGE_EDITING_KINDS,
-    run_image_understanding,
-    TEXT_TO_IMAGE_KINDS,
-)
-from scripts.inference_serving.scheduling import (
+from scripts.inference_multi.scheduling import (
     ParallelMode,
     TextToImageRequest,
     TextToImageResult,
     build_scheduler,
 )
+try:
+    import yaml  # type: ignore
+except ImportError:  # pragma: no cover - pip requirement already present
+    yaml = None
 
 
 def parse_args() -> argparse.Namespace:
@@ -57,9 +72,13 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default=ParallelMode.DP.value,
         choices=[mode.value for mode in ParallelMode],
-        help="Parallel scheduling strategy: data_parallel (sequential). model_parallel is not yet supported.",
+        help="Parallel scheduling strategy: DP,MP. While MP is not yet supported.",
     )
     return parser.parse_args()
+
+
+TEXT_TO_IMAGE_KINDS = {"text2image", "text-to-image"}
+IMAGE_EDITING_KINDS = {"image_editing", "image-editing", "editing"}
 
 def main() -> None:
     args = parse_args()
@@ -161,14 +180,10 @@ def main() -> None:
     if distributed and assigned_total == 0:
         print(f"[rank {rank}] No tasks assigned to this rank.")
 
-    summary_records: List[Tuple[int, Dict[str, Any]]] = []
-    generation_start: Optional[float] = None
-    generation_end: Optional[float] = None
-
-    def mark_generation_start() -> None:
-        nonlocal generation_start
-        if generation_start is None:
-            generation_start = time.perf_counter()
+    
+    summary_records = []
+    generation_start = None
+    generation_end = None
 
     try:
         for local_idx, task_index in enumerate(assigned_indices, start=1):
@@ -184,6 +199,7 @@ def main() -> None:
                 print(f"[{global_position}/{total_tasks}] Running task '{task.task_id}' ({task.kind})")
 
             finalize_text_results(scheduler.poll(), summary_records, output_dir)
+
             task_kind = (task.kind or "").lower()
 
             if task_kind in TEXT_TO_IMAGE_KINDS:
@@ -191,11 +207,11 @@ def main() -> None:
                     raise ValueError(f"Task '{task.task_id}' requires a prompt.")
 
                 _, plan_kwargs = build_text_to_image_kwargs(task, default_shape, args.enable_taylorseer)
+                plan_kwargs = dict(plan_kwargs)
                 prompt_text = task.prompt or ""
                 think_flag = bool(task.think)
-                plan_kwargs = dict(plan_kwargs)
 
-                mark_generation_start()
+                generation_start = time.perf_counter() if generation_start is None else generation_start
                 request = TextToImageRequest(
                     task_index=task_index,
                     task=task,
@@ -206,7 +222,7 @@ def main() -> None:
                 scheduler.submit_text_to_image(request)
 
             elif task_kind in {"image_understanding", "image-understanding", "vlm"}:
-                finalize_text_results(scheduler.wait_all(), summary_records, output_dir)
+                finalize_text_results(scheduler.poll(), summary_records, output_dir)
                 result = run_image_understanding(primary_inferencer, task)
                 text_output = result.get("text")
                 if not text_output:
@@ -237,7 +253,7 @@ def main() -> None:
                 if source_image is None:
                     raise ValueError(f"Task '{task.task_id}' requires an `image` field.")
 
-                mark_generation_start()
+                generation_start = time.perf_counter() if generation_start is None else generation_start
                 with Image.open(source_image) as image_handle:
                     image_handle = image_handle.convert("RGB")
                     plan, thinking_text = primary_text_to_image.prepare_image_editing(
@@ -265,7 +281,7 @@ def main() -> None:
             else:
                 raise ValueError(f"Unsupported task type '{task.kind}' in task '{task.task_id}'")
 
-        finalize_text_results(scheduler.wait_all(), summary_records, output_dir)
+        finalize_text_results(scheduler.poll(), summary_records, output_dir)
         if generation_start is not None and generation_end is None:
             generation_end = time.perf_counter()
     finally:
@@ -304,7 +320,7 @@ def main() -> None:
 
     if dist.is_initialized():
         dist.destroy_process_group()
-        
+
 
 
 if __name__ == "__main__":

@@ -1,4 +1,3 @@
-import argparse
 import json
 import os
 import random
@@ -6,7 +5,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-from concurrent.futures import Future, ThreadPoolExecutor
+
 import numpy as np
 import torch
 from PIL import Image
@@ -38,7 +37,6 @@ except ImportError:  # pragma: no cover - pip requirement already present
     yaml = None
 
 
-
 @dataclass
 class TaskSpec:
     task_id: str
@@ -57,18 +55,14 @@ class TaskSpec:
             self.params = {}
 
 
-def setup_seed(seed: Optional[int]) -> None:
-    if seed is None or seed < 0:
-        return
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+@dataclass
+class DistributedContext:
+    enabled: bool
+    rank: int
+    world_size: int
+    local_rank: int
 
+# ********************************** Checking filenames & paths ****************************** #
 
 def sanitize_filename(text: str, max_length: int = 50) -> str:
     safe = "".join(ch if ch.isalnum() or ch in "-._" else "_" for ch in text.strip())
@@ -79,10 +73,15 @@ def sanitize_filename(text: str, max_length: int = 50) -> str:
         safe = safe[:max_length].rstrip("._")
     return safe
 
-def parse_task_payload(
-    payload: Dict[str, Any],
-    output_dir: Path,
-) -> TaskSpec:
+
+def ensure_path(path: Optional[Path], fallback_stem: str, base_dir: Path, suffix: str) -> Path:
+    if path is None:
+        name = sanitize_filename(fallback_stem)
+        path = base_dir / f"{name}{suffix}"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+def parse_task_payload(payload: Dict[str, Any],output_dir: Path):
     task_id = payload.get("task_id") or payload.get("id") or ""
     prompt = payload.get("prompt")
     kind = (payload.get("type") or payload.get("kind") or "").lower()
@@ -121,8 +120,39 @@ def parse_task_payload(
         image_shape=image_shape,
     )
 
+# ********************************** setup seed and setup seed for distributed settings ****************************** #
 
-def load_tasks(task_file: Optional[Path], output_dir: Path) -> List[TaskSpec]:
+def setup_seed(seed: Optional[int]) -> None:
+    if seed is None or seed < 0:
+        return
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    
+def setup_distributed(local_rank_arg):
+    if not dist.is_available():
+        return DistributedContext(False, 0, 1, max(local_rank_arg, 0))
+
+    env_rank = os.environ.get("RANK")
+    env_world = os.environ.get("WORLD_SIZE")
+    if env_rank is None or env_world is None:
+        return DistributedContext(False, 0, 1, max(local_rank_arg, 0))
+
+    env_local = os.environ.get("LOCAL_RANK")
+    local_rank = local_rank_arg if local_rank_arg >= 0 else int(env_local or env_rank)
+    rank = int(env_rank)
+    world_size = int(env_world)
+
+    return DistributedContext(world_size > 1, rank, world_size, local_rank)
+
+# ********************************** Task/Model Loading ****************************** #
+
+def load_tasks(task_file: Optional[Path], output_dir: Path):
     tasks: List[TaskSpec] = []
     if task_file is None:
         demo_tasks = [
@@ -173,184 +203,6 @@ def load_tasks(task_file: Optional[Path], output_dir: Path) -> List[TaskSpec]:
     for entry in entries:
         tasks.append(parse_task_payload(entry, output_dir))
     return tasks
-
-
-def ensure_path(path: Optional[Path], fallback_stem: str, base_dir: Path, suffix: str) -> Path:
-    if path is None:
-        name = sanitize_filename(fallback_stem)
-        path = base_dir / f"{name}{suffix}"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def build_text_to_image_kwargs(
-    task: TaskSpec,
-    default_shape: Tuple[int, int],
-    enable_taylorseer: bool,
-) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    params = dict(task.params or {})
-    shape_source: Tuple[int, int] = task.image_shape or default_shape
-    shape_value = params.pop("image_shape", params.pop("image_shapes", shape_source))
-    shape = tuple(int(dim) for dim in shape_value)
-    if len(shape) != 2:
-        raise ValueError(f"image_shape must be [H, W], received: {shape}")
-
-    cfg_interval = params.pop("cfg_interval", [0.4, 1.0])
-    if isinstance(cfg_interval, (int, float)):
-        cfg_interval = [float(cfg_interval), 1.0]
-    elif isinstance(cfg_interval, tuple):
-        cfg_interval = list(cfg_interval)
-
-    inference_kwargs = dict(
-        max_think_token_n=params.pop("max_think_token_n", 512),
-        do_sample=params.pop("do_sample", False),
-        text_temperature=params.pop("text_temperature", 0.3),
-        cfg_text_scale=params.pop("cfg_text_scale", 4.0),
-        cfg_img_scale=params.pop("cfg_img_scale", 1.5),
-        cfg_interval=tuple(cfg_interval),
-        timestep_shift=params.pop("timestep_shift", 3.0),
-        num_timesteps=params.pop("num_timesteps", 50),
-        cfg_renorm_min=params.pop("cfg_renorm_min", 0.0),
-        cfg_renorm_type=params.pop("cfg_renorm_type", "global"),
-        enable_taylorseer=params.pop("enable_taylorseer", enable_taylorseer),
-    )
-    if params:
-        raise ValueError(f"Unsupported parameters for text-to-image task: {params}")
-
-    call_kwargs = dict(inference_kwargs)
-    call_kwargs["image_shapes"] = shape
-
-    plan_kwargs = dict(inference_kwargs)
-    plan_kwargs["image_shape"] = shape
-
-    return call_kwargs, plan_kwargs
-
-
-def build_image_editing_kwargs(task: TaskSpec, enable_taylorseer: bool) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    if task.image_path is None:
-        raise ValueError(f"Task '{task.task_id}' requires an `image` field.")
-    if not task.image_path.exists():
-        raise FileNotFoundError(f"Input image does not exist: {task.image_path}")
-
-    params = dict(task.params or {})
-
-    cfg_interval = params.pop("cfg_interval", [0.0, 1.0])
-    if isinstance(cfg_interval, (int, float)):
-        cfg_interval = [float(cfg_interval), 1.0]
-    elif isinstance(cfg_interval, tuple):
-        cfg_interval = list(cfg_interval)
-    if not (isinstance(cfg_interval, list) and len(cfg_interval) == 2):
-        raise ValueError(f"cfg_interval must be a pair of floats, received: {cfg_interval}")
-
-    inference_kwargs = dict(
-        max_think_token_n=params.pop("max_think_token_n", 1000),
-        do_sample=params.pop("do_sample", True),
-        text_temperature=params.pop("text_temperature", 1.0),
-        cfg_text_scale=params.pop("cfg_text_scale", 4.0),
-        cfg_img_scale=params.pop("cfg_img_scale", 2.0),
-        cfg_interval=tuple(cfg_interval),
-        timestep_shift=params.pop("timestep_shift", 3.0),
-        num_timesteps=params.pop("num_timesteps", 50),
-        cfg_renorm_min=params.pop("cfg_renorm_min", 0.0),
-        cfg_renorm_type=params.pop("cfg_renorm_type", "text_channel"),
-        enable_taylorseer=params.pop("enable_taylorseer", enable_taylorseer),
-    )
-
-    if params:
-        raise ValueError(f"Unsupported parameters for image-editing task: {params}")
-
-    plan_kwargs = dict(inference_kwargs)
-    plan_kwargs["image_path"] = task.image_path
-
-    return inference_kwargs, plan_kwargs
-
-
-def run_text_to_image(
-    inferencer: InterleaveInferencer,
-    task: TaskSpec,
-    default_shape: Tuple[int, int],
-    enable_taylorseer: bool,
-) -> Dict[str, Any]:
-    call_kwargs, _ = build_text_to_image_kwargs(task, default_shape, enable_taylorseer)
-    result = inferencer(text=task.prompt or "", think=task.think, **call_kwargs)
-    return result
-
-
-def run_image_editing(inferencer: InterleaveInferencer, task: TaskSpec, enable_taylorseer: bool) -> Dict[str, Any]:
-    inference_kwargs, _ = build_image_editing_kwargs(task, enable_taylorseer)
-
-    with Image.open(task.image_path) as image:
-        image = image.convert("RGB")
-        result = inferencer(image=image, text=task.prompt or "", think=task.think, **inference_kwargs)
-    return result
-
-
-def run_image_understanding(inferencer: InterleaveInferencer, task: TaskSpec) -> Dict[str, Any]:
-    if task.image_path is None:
-        raise ValueError(f"Task '{task.task_id}' requires an `image` field.")
-    if not task.image_path.exists():
-        raise FileNotFoundError(f"Input image does not exist: {task.image_path}")
-
-    params = dict(task.params or {})
-    inference_kwargs = dict(
-        do_sample=params.pop("do_sample", False),
-        text_temperature=params.pop("text_temperature", 0.3),
-        max_think_token_n=params.pop("max_think_token_n", 512),
-    )
-    if params:
-        raise ValueError(f"Unsupported parameters for image-understanding task: {params}")
-
-    image = pil_img2rgb(Image.open(task.image_path).convert("RGB"))
-    result = inferencer(image=image, text=task.prompt or "", think=task.think, understanding_output=True, **inference_kwargs)
-    return result
-
-@dataclass
-class DistributedContext:
-    enabled: bool
-    rank: int
-    world_size: int
-    local_rank: int
-
-
-def setup_distributed(local_rank_arg: int) -> DistributedContext:
-    if not dist.is_available():
-        return DistributedContext(False, 0, 1, max(local_rank_arg, 0))
-
-    env_rank = os.environ.get("RANK")
-    env_world = os.environ.get("WORLD_SIZE")
-    if env_rank is None or env_world is None:
-        return DistributedContext(False, 0, 1, max(local_rank_arg, 0))
-
-    env_local = os.environ.get("LOCAL_RANK")
-    local_rank = local_rank_arg if local_rank_arg >= 0 else int(env_local or env_rank)
-    rank = int(env_rank)
-    world_size = int(env_world)
-
-    return DistributedContext(world_size > 1, rank, world_size, local_rank)
-
-
-def setup_seed(seed: Optional[int]) -> None:
-    if seed is None or seed < 0:
-        return
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-
-
-def sanitize_filename(text: str, max_length: int = 50) -> str:
-    safe = "".join(ch if ch.isalnum() or ch in "-._" else "_" for ch in text.strip())
-    safe = safe.strip("._")
-    if not safe:
-        safe = "sample"
-    if len(safe) > max_length:
-        safe = safe[:max_length].rstrip("._")
-    return safe
-
 
 def load_model(
     model_path: str,
@@ -479,3 +331,40 @@ def load_model(
     print(f"Model shards placed on GPUs: {used_devices or [f'cuda:{i}' for i in device_ids]}")
 
     return model, vae_model, tokenizer, vae_transform, vit_transform, new_token_ids
+
+# ********************************** Result Finalization ****************************** #
+
+def finalize_text_results(results, summary_records, output_dir):
+    for outcome in results:
+        if outcome.error:
+            raise RuntimeError(
+                f"Text-to-image task '{outcome.task.task_id}' failed."
+            ) from outcome.error
+        image = outcome.image
+        if image is None:
+            raise RuntimeError(f"No image returned for task '{outcome.task.task_id}'")
+        image_path = ensure_path(outcome.task.output_image, outcome.task.task_id, output_dir, ".png")
+        image.save(image_path)
+
+        thinking_path = None
+        if outcome.thinking_text:
+            thinking_path = ensure_path(
+                outcome.task.output_text,
+                f"{outcome.task.task_id}_thinking",
+                output_dir,
+                ".txt",
+            )
+            thinking_path.write_text(outcome.thinking_text, encoding="utf-8")
+
+        summary_records.append(
+            (
+                outcome.task_index,
+                {
+                    "task_id": outcome.task.task_id,
+                    "type": outcome.task.kind,
+                    "prompt": outcome.task.prompt,
+                    "image_path": str(image_path),
+                    "thinking_path": str(thinking_path) if thinking_path else None,
+                },
+            )
+        )
