@@ -13,7 +13,12 @@ from inference.utils.utils import TaskSpec, ensure_path
 
 # Default fallback constants
 DEFAULT_CFG_INTERVAL = (0.4, 1.0)
-GEN_THINK_SYSTEM_PROMPT = "You are a helpful assistant. First, think about the request steps."
+
+VLM_THINK_SYSTEM_PROMPT = '''You should first think about the reasoning process in the mind and then provide the user with the answer. 
+The reasoning process is enclosed within <think> </think> tags, i.e. <think> reasoning process here </think> answer here'''
+
+GEN_THINK_SYSTEM_PROMPT = '''You should first think about the planning process in the mind and then generate the image. 
+The planning process is enclosed within <think> </think> tags, i.e. <think> planning process here </think> image here'''
 
 # --- Helper: Parameter Extraction ---
 def get_param(params: Dict[str, Any], key: str, default: Any) -> Any:

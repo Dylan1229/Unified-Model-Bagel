@@ -69,39 +69,3 @@ def write_summary(
         with summary_path.open("w", encoding="utf-8") as handle:
             json.dump(summary, handle, indent=2, ensure_ascii=False)
         print(f"Completed {len(summary)} tasks. Summary written to {summary_path}")
-
-# ********************************** Finalize text output ****************************** #
-def finalize_text_results(results, summary_records, output_dir):
-    for outcome in results:
-        if outcome.error:
-            raise RuntimeError(
-                f"Text-to-image task '{outcome.task.task_id}' failed."
-            ) from outcome.error
-        image = outcome.image
-        if image is None:
-            raise RuntimeError(f"No image returned for task '{outcome.task.task_id}'")
-        image_path = ensure_path(outcome.task.output_image, outcome.task.task_id, output_dir, ".png")
-        image.save(image_path)
-
-        thinking_path = None
-        if outcome.thinking_text:
-            thinking_path = ensure_path(
-                outcome.task.output_text,
-                f"{outcome.task.task_id}_thinking",
-                output_dir,
-                ".txt",
-            )
-            thinking_path.write_text(outcome.thinking_text, encoding="utf-8")
-
-        summary_records.append(
-            (
-                outcome.task_index,
-                {
-                    "task_id": outcome.task.task_id,
-                    "type": outcome.task.kind,
-                    "prompt": outcome.task.prompt,
-                    "image_path": str(image_path),
-                    "thinking_path": str(thinking_path) if thinking_path else None,
-                },
-            )
-        )
