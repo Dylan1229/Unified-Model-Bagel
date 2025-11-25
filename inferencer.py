@@ -208,24 +208,30 @@ class InterleaveInferencer:
     def decode_image(self, latent, image_shape):
         H, W = image_shape
         h, w = H // self.model.latent_downsample, W // self.model.latent_downsample
+        
+        # Explicitly determine the target GPU device
+        if torch.cuda.is_available():
+            target_device = torch.device("cuda", torch.cuda.current_device())
+        else:
+            target_device = torch.device("cpu")
 
-        vae_device = None
-        try:
-            vae_device = next(self.vae_model.parameters()).device
-        except StopIteration:
-            pass
-        if vae_device is not None and latent.device != vae_device:
-            latent = latent.to(vae_device, non_blocking=True)
+        # 1. Force the latent to the target GPU
+        if latent.device != target_device:
+            latent = latent.to(target_device, non_blocking=True)
+            
+        # 2. Force the VAE model to the target GPU
+        self._ensure_vae_device(target_device)
 
         latent = latent.reshape(1, h, w, self.model.latent_patch_size, self.model.latent_patch_size, self.model.latent_channel)
         latent = torch.einsum("nhwpqc->nchpwq", latent)
         latent = latent.reshape(1, self.model.latent_channel, h * self.model.latent_patch_size, w * self.model.latent_patch_size)
-        target_device = latent.device
-        self._ensure_vae_device(target_device)
+        
+        # Correctly get the parameter to check dtype
         param = next(self.vae_model.parameters(), None)
-        print(f"[decode_image] latent_device={target_device} vae_device={param.device if param is not None else 'unknown'}")
+
         if param is not None and latent.dtype != param.dtype:
             latent = latent.to(param.dtype)
+            
         image = self.vae_model.decode(latent)
         image = (image * 0.5 + 0.5).clamp(0, 1)[0].permute(1, 2, 0) * 255
         image = Image.fromarray((image).to(torch.uint8).cpu().numpy())
@@ -258,7 +264,6 @@ class InterleaveInferencer:
         input_lists: List[Union[str, Image.Image]],
         think=False,
         understanding_output=False,
-
         max_think_token_n=1000,
         do_sample=False,
         text_temperature=0.3,
@@ -321,11 +326,11 @@ class InterleaveInferencer:
 
             else:
                 if think:
-                    torch.cuda.nvtx.range_push("Text Decoding (Thinking Mode in T2I Gen)")
+                    torch.cuda.nvtx.range_push("Text Decoding")
                     gen_text = self.gen_text(gen_context, do_sample=do_sample, temperature=text_temperature, max_length=max_think_token_n)
                     torch.cuda.nvtx.range_pop()
 
-                    torch.cuda.nvtx.range_push("Text Prefill Again (Thinking Mode in T2I Gen)")
+                    torch.cuda.nvtx.range_push("Text Prefill Again")
                     gen_context = self.update_context_text(gen_text, gen_context)
                     torch.cuda.nvtx.range_pop()
 
@@ -379,6 +384,3 @@ class InterleaveInferencer:
             elif isinstance(i, str):
                 output_dict['text'] = i
         return output_dict
-    
-    
-    

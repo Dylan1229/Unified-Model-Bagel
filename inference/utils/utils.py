@@ -214,6 +214,9 @@ def load_model(
     available_gpus = torch.cuda.device_count()
     if available_gpus == 0:
         raise RuntimeError("CUDA device is required but not available.")
+    
+    # [Optim] A100/H100 optimization to reduce loading and inference latency
+    torch.set_float32_matmul_precision('high')
 
     if device_ids is not None and len(device_ids) == 0:
         raise ValueError("device_ids must contain at least one GPU index.")
@@ -307,7 +310,13 @@ def load_model(
             if module in device_map:
                 device_map[module] = first_device
 
-    offload_path = Path(offload_dir or "/tmp/offload")
+    # [FIX] Automatically append Process ID (PID) to avoid collisions in Multi-Process loading
+    if offload_dir is None:
+        # Use a unique temporary directory for this specific process
+        offload_path = Path(f"/tmp/offload_{os.getpid()}")
+    else:
+        offload_path = Path(offload_dir)
+        
     offload_path.mkdir(parents=True, exist_ok=True)
 
     model = load_checkpoint_and_dispatch(
@@ -331,40 +340,3 @@ def load_model(
     print(f"Model shards placed on GPUs: {used_devices or [f'cuda:{i}' for i in device_ids]}")
 
     return model, vae_model, tokenizer, vae_transform, vit_transform, new_token_ids
-
-# ********************************** Result Finalization ****************************** #
-
-def finalize_text_results(results, summary_records, output_dir):
-    for outcome in results:
-        if outcome.error:
-            raise RuntimeError(
-                f"Text-to-image task '{outcome.task.task_id}' failed."
-            ) from outcome.error
-        image = outcome.image
-        if image is None:
-            raise RuntimeError(f"No image returned for task '{outcome.task.task_id}'")
-        image_path = ensure_path(outcome.task.output_image, outcome.task.task_id, output_dir, ".png")
-        image.save(image_path)
-
-        thinking_path = None
-        if outcome.thinking_text:
-            thinking_path = ensure_path(
-                outcome.task.output_text,
-                f"{outcome.task.task_id}_thinking",
-                output_dir,
-                ".txt",
-            )
-            thinking_path.write_text(outcome.thinking_text, encoding="utf-8")
-
-        summary_records.append(
-            (
-                outcome.task_index,
-                {
-                    "task_id": outcome.task.task_id,
-                    "type": outcome.task.kind,
-                    "prompt": outcome.task.prompt,
-                    "image_path": str(image_path),
-                    "thinking_path": str(thinking_path) if thinking_path else None,
-                },
-            )
-        )
