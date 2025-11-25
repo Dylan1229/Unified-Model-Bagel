@@ -2,9 +2,9 @@ import os
 os.environ['CUDA_VISIBLE_DEVICES'] = '6,7'
 import sys
 
-project_root = "/scr/dataset/yuke/fanjiang/repo/unified-model/Bagel"
-if project_root not in sys.path:
-    sys.path.insert(0, project_root)
+# project_root = "/scr/dataset/yuke/fanjiang/repo/unified-model/Bagel"
+# if project_root not in sys.path:
+#     sys.path.insert(0, project_root)
     
 import random
 import numpy as np
@@ -21,8 +21,6 @@ from modeling.bagel.qwen2_navit import NaiveCache
 from modeling.autoencoder import load_ae
 from accelerate import infer_auto_device_map, load_checkpoint_and_dispatch, init_empty_weights
 from inferencer import InterleaveInferencer
-
-
 
 def setup_seed(seed=42):
     """Set random seed for reproducibility"""
@@ -137,13 +135,15 @@ def main():
     # Model path
     model_path = "./models/BAGEL-7B-MoT"
 
-    # Load model
+    # torch.cuda.nvtx.range_push("Model Loading")
     model, vae_model, tokenizer, vae_transform, vit_transform, new_token_ids = load_model(
         model_path, 
         max_mem_per_gpu="80GiB"
     )
+    # torch.cuda.nvtx.range_pop()
 
-    # Initialize inferencer
+    # Initialize inferencer with NVTX marker
+    # torch.cuda.nvtx.range_push("Inferencer Init")
     inferencer = InterleaveInferencer(
         model=model, 
         vae_model=vae_model, 
@@ -152,23 +152,23 @@ def main():
         vit_transform=vit_transform, 
         new_token_ids=new_token_ids
     )
-    image = Image.open('test_images/women.jpg')
-    prompt = 'She boards a modern subway, quietly reading a folded newspaper, wearing the same clothes.'
+    # torch.cuda.nvtx.range_pop()
+    prompt = "a car made of small cars."
     
     print(f"Prompt: {prompt}")
     print('-' * 50)
 
-    # # Inference hyperparameters without think
+    # Inference hyperparameters without think
     # inference_hyper=dict(
     #     cfg_text_scale=4.0,
-    #     cfg_img_scale=2.0,
-    #     cfg_interval=[0.0, 1.0],
+    #     cfg_img_scale=1.0,
+    #     cfg_interval=[0.4, 1.0],
     #     timestep_shift=3.0,
     #     num_timesteps=50,
     #     cfg_renorm_min=0.0,
-    #     cfg_renorm_type="text_channel",
+    #     cfg_renorm_type="global",
     # )
-    # output_dict = inferencer(image=image, text=prompt, **inference_hyper)
+    # output_dict = inferencer(text=prompt, **inference_hyper)
     
     # Inference hyperparameters with think
     inference_hyper=dict(
@@ -176,18 +176,22 @@ def main():
         do_sample=False,
         # text_temperature=0.3,
         cfg_text_scale=4.0,
-        cfg_img_scale=2.0,
-        cfg_interval=[0.0, 1.0],
+        cfg_img_scale=1.0,
+        cfg_interval=[0.4, 1.0],
         timestep_shift=3.0,
         num_timesteps=50,
         cfg_renorm_min=0.0,
-        cfg_renorm_type="text_channel",
+        cfg_renorm_type="global",
     )
-    output_dict = inferencer(image=image, text=prompt, think=True, **inference_hyper)
+    
+    output_dict = inferencer(text=prompt, think=True, **inference_hyper)
+    
+    # ============ Nsight Systems End ============
+    
     print(output_dict['text'])
     
     # Save generated image
-    output_dir = "./results/image_edit"
+    output_dir = "./results/image_gen"
     os.makedirs(output_dir, exist_ok=True)
     
     # Generate filename with timestamp

@@ -1,0 +1,96 @@
+++ pwd
++ export PYTHONPATH=/scr/dataset/yuke/fanjiang/repo/unified-model/Bagel:
++ PYTHONPATH=/scr/dataset/yuke/fanjiang/repo/unified-model/Bagel:
++ export TF_CPP_MIN_LOG_LEVEL=3
++ TF_CPP_MIN_LOG_LEVEL=3
++ export LAUNCHER=pytorch
++ LAUNCHER=pytorch
++ DATASET=mme
++ echo 'CHECKPOINT: '
+CHECKPOINT: 
++ ARGS=("$@")
++ ENABLE_PROFILE=true
++ [[ 5 -gt 0 ]]
++ case "$1" in
++ shift
++ [[ 4 -gt 0 ]]
++ case "$1" in
++ shift
++ [[ 3 -gt 0 ]]
++ case "$1" in
++ shift
++ [[ 2 -gt 0 ]]
++ case "$1" in
++ shift
++ [[ 1 -gt 0 ]]
++ case "$1" in
++ shift
++ [[ 0 -gt 0 ]]
++ echo 'GPUS: 1'
+GPUS: 1
++ echo 'ENABLE_PROFILE: true'
+ENABLE_PROFILE: true
++ '[' mme == mme ']'
++ '[' true = true ']'
+++ date +%Y%m%d_%H%M%S
++ nsys profile --trace=cuda,nvtx,osrt,cudnn,cublas --output=/scr/dataset/yuke/fanjiang/repo/unified-model/Bagel/profile/mme_profile_20251009_223610 --force-overwrite=true --capture-range=cudaProfilerApi --capture-range-end=stop python -m eval.vlm.eval.mme.eval --out-dir /scr/dataset/yuke/fanjiang/repo/unified-model/Bagel/results/mme --model-path /scr/dataset/yuke/fanjiang/repo/unified-model/Bagel/models/BAGEL-7B-MoT
+WARNING: CPU IP/backtrace sampling not supported, disabling.
+Try the 'nsys status --environment' command to learn more.
+
+WARNING: CPU context switch tracing not supported, disabling.
+Try the 'nsys status --environment' command to learn more.
+
+_IncompatibleKeys(missing_keys=[], unexpected_keys=['latent_pos_embed.pos_embed', 'llm2vae.bias', 'llm2vae.weight', 'time_embedder.mlp.0.bias', 'time_embedder.mlp.0.weight', 'time_embedder.mlp.2.bias', 'time_embedder.mlp.2.weight', 'vae2llm.bias', 'vae2llm.weight'])
+[test] total_params: 14.578347936B
+  0%|          | 0/60 [00:00<?, ?it/s]  2%|▏         | 1/60 [00:00<00:48,  1.23it/s]  3%|▎         | 2/60 [00:01<00:43,  1.33it/s]  5%|▌         | 3/60 [00:01<00:30,  1.87it/s]  7%|▋         | 4/60 [00:02<00:24,  2.32it/s]  8%|▊         | 5/60 [00:02<00:20,  2.72it/s] 10%|█         | 6/60 [00:02<00:17,  3.03it/s] 12%|█▏        | 7/60 [00:02<00:16,  3.25it/s] 13%|█▎        | 8/60 [00:03<00:15,  3.40it/s] 15%|█▌        | 9/60 [00:03<00:14,  3.46it/s]Capture range started in the application.
+Generating '/tmp/nsys-report-bd75.qdstrm'
+Capture range ended in the application.
+[1/1] [0%                          ] mme_profile_20251009_223610.nsys-rep[1/1] [0%                          ] mme_profile_20251009_223610.nsys-rep[1/1] [11%                         ] mme_profile_20251009_223610.nsys-rep[1/1] [===22%                      ] mme_profile_20251009_223610.nsys-rep[1/1] [=16%                        ] mme_profile_20251009_223610.nsys-rep[1/1] [12%                         ] mme_profile_20251009_223610.nsys-rep[1/1] [10%                         ] mme_profile_20251009_223610.nsys-rep[1/1] [8%                          ] mme_profile_20251009_223610.nsys-rep[1/1] [7%                          ] mme_profile_20251009_223610.nsys-rep[1/1] [6%                          ] mme_profile_20251009_223610.nsys-rep[1/1] [5%                          ] mme_profile_20251009_223610.nsys-rep[1/1] [5%                          ] mme_profile_20251009_223610.nsys-rep[1/1] [8%                          ] mme_profile_20251009_223610.nsys-rep[1/1] [11%                         ] mme_profile_20251009_223610.nsys-rep[1/1] [14%                         ] mme_profile_20251009_223610.nsys-rep[1/1] [==18%                       ] mme_profile_20251009_223610.nsys-rep[1/1] [==20%                       ] mme_profile_20251009_223610.nsys-rep[1/1] [===24%                      ] mme_profile_20251009_223610.nsys-rep[1/1] [====27%                     ] mme_profile_20251009_223610.nsys-rep[1/1] [=====30%                    ] mme_profile_20251009_223610.nsys-rep[1/1] [======33%                   ] mme_profile_20251009_223610.nsys-rep[1/1] [=======36%                  ] mme_profile_20251009_223610.nsys-rep[1/1] [=======39%                  ] mme_profile_20251009_223610.nsys-rep[1/1] [=========43%                ] mme_profile_20251009_223610.nsys-rep[1/1] [=========45%                ] mme_profile_20251009_223610.nsys-rep[1/1] [==========49%               ] mme_profile_20251009_223610.nsys-rep[1/1] [===========52%              ] mme_profile_20251009_223610.nsys-rep[1/1] [============55%             ] mme_profile_20251009_223610.nsys-rep[1/1] [=============59%            ] mme_profile_20251009_223610.nsys-rep[1/1] [==============62%           ] mme_profile_20251009_223610.nsys-rep[1/1] [===============65%          ] mme_profile_20251009_223610.nsys-rep[1/1] [================68%         ] mme_profile_20251009_223610.nsys-rep[1/1] [================71%         ] mme_profile_20251009_223610.nsys-rep[1/1] [=================74%        ] mme_profile_20251009_223610.nsys-rep[1/1] [==================78%       ] mme_profile_20251009_223610.nsys-rep[1/1] [===================80%      ] mme_profile_20251009_223610.nsys-rep[1/1] [====================84%     ] mme_profile_20251009_223610.nsys-rep[1/1] [=====================87%    ] mme_profile_20251009_223610.nsys-rep[1/1] [======================90%   ] mme_profile_20251009_223610.nsys-rep[1/1] [======================91%   ] mme_profile_20251009_223610.nsys-rep[1/1] [========================100%] mme_profile_20251009_223610.nsys-rep[1/1] [========================100%] mme_profile_20251009_223610.nsys-rep
+ 15%|█▌        | 9/60 [00:10<01:01,  1.20s/it]
+=========== Perception ===========
+total score: 1685.0065026010402 
+
+	 existence  score: 195.0
+	 count  score: 178.33333333333331
+	 position  score: 178.33333333333331
+	 color  score: 200.0
+	 posters  score: 168.7074829931973
+	 celebrity  score: 120.88235294117646
+	 scene  score: 150.0
+	 landmark  score: 176.5
+	 artwork  score: 139.75
+	 OCR  score: 177.5
+
+
+=========== Cognition ===========
+total score: 696.0714285714286 
+
+	 commonsense_reasoning  score: 158.57142857142856
+	 numerical_calculation  score: 167.5
+	 text_translation  score: 185.0
+	 code_reasoning  score: 185.0
+
+
+write results to file /scr/dataset/yuke/fanjiang/repo/unified-model/Bagel/results/mme/results.txt
+[Profiling] Started profiling at sample 1
+[Profiling] Stopped profiling at sample 10
+The target application terminated. One or more process it created re-parented.
+Waiting for termination of re-parented processes.
+Use the `--wait` option to modify this behavior.
+Generated:
+    /scr/dataset/yuke/fanjiang/repo/unified-model/Bagel/profile/mme_profile_20251009_223610.nsys-rep
++ '[' mme == mmvet ']'
++ '[' mme == mmbench-dev-en ']'
++ '[' mme == mmbench-dev-cn ']'
++ '[' mme == mmbench-test-en ']'
++ '[' mme == mmbench-test-cn ']'
++ '[' mme == mmmu-dev ']'
++ '[' mme == mmmu-val ']'
++ '[' mme == mmmu-val_cot ']'
++ '[' mme == mmmu-test ']'
++ '[' mme == mathvista-testmini ']'
++ '[' mme == mathvista-test ']'
++ '[' mme == pope ']'
++ '[' mme == pope_cot ']'
++ '[' mme == vqa-gqa-testdev ']'
++ '[' mme == mmvp ']'

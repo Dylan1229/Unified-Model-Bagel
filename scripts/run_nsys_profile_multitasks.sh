@@ -1,5 +1,4 @@
 #!/bin/bash
-export cuda_visible_devices=1,2,3,4
 project_root="/mnt"
 if [[ ":$PYTHONPATH:" != *":$project_root:"* ]]; then
   export PYTHONPATH="$project_root:$PYTHONPATH"
@@ -16,7 +15,8 @@ nsys profile \
   --cuda-memory-usage=true \
   torchrun --nproc_per_node=2 scripts/inference_multi/multi_tasks_main.py \
     --model_path ./models/BAGEL-7B-MoT \
-    --tasks ./data_profile/multi_tasks/tasks_mixed.json \
+    --tasks ./data_profile/multi_tasks/und-gen.json \
     --output ./results/multi_tasks \
+    --num_gpus 2  \
     --seed 42 \
     --parallel_mode data_parallel

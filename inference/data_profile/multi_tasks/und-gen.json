@@ -1,0 +1,19 @@
+[
+  {
+    "task_id": "edit_room_Add_sunlight_coming",
+    "type": "text2image",
+    "prompt": "A cute golden retriever puppy sitting in a field of sunflowers under a clear blue sky.",
+    "think": true,
+    "shape": [
+      512,
+      512
+    ]
+  },
+  {
+    "task_id": "v1_215_Chorleywood_is_a_vil",
+    "type": "image_understanding",
+    "prompt": "Chorleywood is a village near London whose population has increased steadily since the middle of the nineteenth century. The map below shows the development of the village.\\n\\nWrite a report for a university lecturer describing the development of the village. \\n\\nYou should write at least 150 words.",
+    "image": "./data_profile/images/understand_long/v1_215.jpg",
+    "think": true
+  }
+]

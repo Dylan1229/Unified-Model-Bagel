@@ -1,0 +1,5 @@
+10002.jpg	Does this artwork exist in the form of painting? Please answer yes or no.	Yes
+10002.jpg	Does this artwork exist in the form of glassware? Please answer yes or no.	No
+10049.jpg	Does this artwork exist in the form of painting? Please answer yes or no.	Yes
+10049.jpg	Does this artwork exist in the form of sculpture? Please answer yes or no.	No
+10256.jpg	Does this artwork exist in the form of painting? Please answer yes or no.	Yes

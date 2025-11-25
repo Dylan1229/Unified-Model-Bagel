@@ -34,7 +34,7 @@ from multi_task_function import (
     run_image_understanding
 )
 
-from inference.utils.utils import(
+from scripts.utils.utils import(
     setup_seed,
     setup_distributed,
     load_model,
@@ -50,8 +50,8 @@ from scripts.inference_multi.scheduling import (
     build_scheduler,
 )
 try:
-    import yaml  # type: ignore
-except ImportError:  # pragma: no cover - pip requirement already present
+    import yaml  
+except ImportError:  
     yaml = None
 
 
@@ -72,7 +72,7 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default=ParallelMode.DP.value,
         choices=[mode.value for mode in ParallelMode],
-        help="Parallel scheduling strategy: DP,MP. While MP is not yet supported.",
+        help="Parallel scheduling strategy: DP or MP. Currently,MP is not yet supported.",
     )
     return parser.parse_args()
 
@@ -96,6 +96,7 @@ def main() -> None:
     if parallel_mode == ParallelMode.MP:
         raise NotImplementedError("Model parallel inference is not implemented yet.")
 
+    # ----------------------Distributed setup--------------------------#
     if distributed:
         if local_rank < 0 or local_rank >= available_gpus:
             raise RuntimeError(
@@ -124,11 +125,12 @@ def main() -> None:
         output_dir.mkdir(parents=True, exist_ok=True)
     if distributed:
         dist.barrier()
-
+    # ----------------------Task Loading--------------------------#
     setup_seed(args.seed)
     tasks = load_tasks(args.tasks, output_dir)
     total_tasks = len(tasks)
 
+    # ----------------------Model Loading--------------------------#
     if distributed and args.num_gpus != 1:
         if rank == 0:
             print("Naive data parallel mode runs one GPU per process; ignoring --num_gpus.")
@@ -175,6 +177,7 @@ def main() -> None:
 
     default_shape = tuple(args.default_shape)
 
+    # ----------------------Naive assignment of tasks to GPUs--------------------------#
     assigned_indices = list(range(rank, total_tasks, world_size)) if distributed else list(range(total_tasks))
     assigned_total = len(assigned_indices)
     if distributed and assigned_total == 0:
@@ -197,7 +200,8 @@ def main() -> None:
                 )
             else:
                 print(f"[{global_position}/{total_tasks}] Running task '{task.task_id}' ({task.kind})")
-
+                
+            # Asynchronously
             finalize_text_results(scheduler.poll(), summary_records, output_dir)
 
             task_kind = (task.kind or "").lower()
@@ -287,6 +291,7 @@ def main() -> None:
     finally:
         scheduler.shutdown()
 
+    # ----------------------Summary Writing--------------------------#
     if distributed:
         gathered: List[List[Tuple[int, Dict[str, Any]]]] = [None] * world_size
         dist.barrier()

@@ -211,6 +211,7 @@ def load_model(
     device_ids: Optional[List[int]] = None,
     offload_dir: Optional[Path] = None,
 ):
+    # ----------------------Robust GPU Selection--------------------------#
     available_gpus = torch.cuda.device_count()
     if available_gpus == 0:
         raise RuntimeError("CUDA device is required but not available.")
@@ -230,7 +231,8 @@ def load_model(
         else:
             num_gpus = min(num_gpus, available_gpus)
         device_ids = list(range(num_gpus))
-
+        
+     # ----------------------Model Initialization--------------------------#
     num_selected_gpus = len(device_ids)
     llm_config = Qwen2Config.from_json_file(os.path.join(model_path, "llm_config.json"))
     llm_config.qk_norm = True

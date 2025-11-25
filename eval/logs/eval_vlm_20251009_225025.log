@@ -1,0 +1,112 @@
+++ pwd
++ export PYTHONPATH=/scr/dataset/yuke/fanjiang/repo/unified-model/Bagel:
++ PYTHONPATH=/scr/dataset/yuke/fanjiang/repo/unified-model/Bagel:
++ export TF_CPP_MIN_LOG_LEVEL=3
++ TF_CPP_MIN_LOG_LEVEL=3
++ export LAUNCHER=pytorch
++ LAUNCHER=pytorch
++ DATASET=mme
++ echo 'CHECKPOINT: '
+CHECKPOINT: 
++ ARGS=("$@")
++ ENABLE_PROFILE=true
++ [[ 5 -gt 0 ]]
++ case "$1" in
++ shift
++ [[ 4 -gt 0 ]]
++ case "$1" in
++ shift
++ [[ 3 -gt 0 ]]
++ case "$1" in
++ shift
++ [[ 2 -gt 0 ]]
++ case "$1" in
++ shift
++ [[ 1 -gt 0 ]]
++ case "$1" in
++ shift
++ [[ 0 -gt 0 ]]
++ echo 'GPUS: 1'
+GPUS: 1
++ echo 'ENABLE_PROFILE: true'
+ENABLE_PROFILE: true
++ '[' mme == mme ']'
++ '[' true = true ']'
+++ date +%Y%m%d_%H%M%S
++ nsys profile --trace=cuda,nvtx,osrt,cudnn,cublas --python-sampling=true --gpu-metrics-device=all --gpu-metrics-frequency=5000 --output=/scr/dataset/yuke/fanjiang/repo/unified-model/Bagel/profile/mme_profile_20251009_225025 --force-overwrite=true --capture-range=cudaProfilerApi --capture-range-end=stop python -m eval.vlm.eval.mme.eval --out-dir /scr/dataset/yuke/fanjiang/repo/unified-model/Bagel/results/mme --model-path /scr/dataset/yuke/fanjiang/repo/unified-model/Bagel/models/BAGEL-7B-MoT
+WARNING: CPU IP/backtrace sampling not supported, disabling.
+Try the 'nsys status --environment' command to learn more.
+
+WARNING: CPU context switch tracing not supported, disabling.
+Try the 'nsys status --environment' command to learn more.
+
+_IncompatibleKeys(missing_keys=[], unexpected_keys=['latent_pos_embed.pos_embed', 'llm2vae.bias', 'llm2vae.weight', 'time_embedder.mlp.0.bias', 'time_embedder.mlp.0.weight', 'time_embedder.mlp.2.bias', 'time_embedder.mlp.2.weight', 'vae2llm.bias', 'vae2llm.weight'])
+[test] total_params: 14.578347936B
+  0%|          | 0/60 [00:00<?, ?it/s]  2%|▏         | 1/60 [00:00<00:44,  1.31it/s]  3%|▎         | 2/60 [00:02<01:04,  1.11s/it]  3%|▎         | 2/60 [00:02<01:10,  1.21s/it]
+Traceback (most recent call last):
+  File "/hdd/yuke/fanjiang/conda_env/bagel/lib/python3.10/runpy.py", line 196, in _run_module_as_main
+    return _run_code(code, main_globals, None,
+  File "/hdd/yuke/fanjiang/conda_env/bagel/lib/python3.10/runpy.py", line 86, in _run_code
+    exec(code, run_globals)
+  File "/scr/dataset/yuke/fanjiang/repo/unified-model/Bagel/eval/vlm/eval/mme/eval.py", line 74, in <module>
+    response = model.chat(
+  File "/hdd/yuke/fanjiang/conda_env/bagel/lib/python3.10/site-packages/torch/utils/_contextlib.py", line 116, in decorate_context
+    return func(*args, **kwargs)
+  File "/scr/dataset/yuke/fanjiang/repo/unified-model/Bagel/modeling/bagel/bagel.py", line 1045, in chat
+    past_key_values = self.forward_cache_update_vit(past_key_values, **generation_input)
+  File "/hdd/yuke/fanjiang/conda_env/bagel/lib/python3.10/site-packages/torch/utils/_contextlib.py", line 116, in decorate_context
+    return func(*args, **kwargs)
+  File "/scr/dataset/yuke/fanjiang/repo/unified-model/Bagel/modeling/bagel/bagel.py", line 404, in forward_cache_update_vit
+    output = self.language_model.forward_inference(
+  File "/scr/dataset/yuke/fanjiang/repo/unified-model/Bagel/modeling/bagel/qwen2_navit.py", line 1173, in forward_inference
+    outputs = self.model(
+  File "/hdd/yuke/fanjiang/conda_env/bagel/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1736, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/hdd/yuke/fanjiang/conda_env/bagel/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1747, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/scr/dataset/yuke/fanjiang/repo/unified-model/Bagel/modeling/bagel/qwen2_navit.py", line 968, in forward
+    return self.forward_inference(*args, **kwargs)
+  File "/scr/dataset/yuke/fanjiang/repo/unified-model/Bagel/modeling/bagel/qwen2_navit.py", line 1062, in forward_inference
+    packed_query_sequence, past_key_values = decoder_layer(
+  File "/hdd/yuke/fanjiang/conda_env/bagel/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1736, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/hdd/yuke/fanjiang/conda_env/bagel/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1747, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/scr/dataset/yuke/fanjiang/repo/unified-model/Bagel/modeling/bagel/qwen2_navit.py", line 711, in forward
+    return self.forward_inference(*args, **kwargs)
+  File "/scr/dataset/yuke/fanjiang/repo/unified-model/Bagel/modeling/bagel/qwen2_navit.py", line 822, in forward_inference
+    packed_query_sequence = residual + packed_query_sequence
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 28.00 MiB. GPU 0 has a total capacity of 79.11 GiB of which 18.81 MiB is free. Including non-PyTorch memory, this process has 79.08 GiB memory in use. Of the allocated memory 78.07 GiB is allocated by PyTorch, and 348.47 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+[Profiling] Started profiling at sample 1
+The target application terminated. One or more process it created re-parented.
+Waiting for termination of re-parented processes.
+Use the `--wait` option to modify this behavior.
+GPU 0: General Metrics for NVIDIA GH100 (any frequency)
+GPU 1: General Metrics for NVIDIA GH100 (any frequency)
+GPU 2: General Metrics for NVIDIA GH100 (any frequency)
+GPU 3: General Metrics for NVIDIA GH100 (any frequency)
+GPU 4: General Metrics for NVIDIA GH100 (any frequency)
+GPU 5: General Metrics for NVIDIA GH100 (any frequency)
+GPU 6: General Metrics for NVIDIA GH100 (any frequency)
+GPU 7: General Metrics for NVIDIA GH100 (any frequency)
+Capture range started in the application.
+Generating '/tmp/nsys-report-4075.qdstrm'
+Capture range ended in the application.
+[1/1] [0%                          ] mme_profile_20251009_225025.nsys-rep[1/1] [0%                          ] mme_profile_20251009_225025.nsys-rep[1/1] [6%                          ] mme_profile_20251009_225025.nsys-rep[1/1] [12%                         ] mme_profile_20251009_225025.nsys-rep[1/1] [====25%                     ] mme_profile_20251009_225025.nsys-rep[1/1] [=========43%                ] mme_profile_20251009_225025.nsys-rep[1/1] [==============62%           ] mme_profile_20251009_225025.nsys-rep[1/1] [===================80%      ] mme_profile_20251009_225025.nsys-rep[1/1] [=====================88%    ] mme_profile_20251009_225025.nsys-rep[1/1] [========================100%] mme_profile_20251009_225025.nsys-rep[1/1] [========================100%] mme_profile_20251009_225025.nsys-rep
+Generated:
+    /scr/dataset/yuke/fanjiang/repo/unified-model/Bagel/profile/mme_profile_20251009_225025.nsys-rep
++ '[' mme == mmvet ']'
++ '[' mme == mmbench-dev-en ']'
++ '[' mme == mmbench-dev-cn ']'
++ '[' mme == mmbench-test-en ']'
++ '[' mme == mmbench-test-cn ']'
++ '[' mme == mmmu-dev ']'
++ '[' mme == mmmu-val ']'
++ '[' mme == mmmu-val_cot ']'
++ '[' mme == mmmu-test ']'
++ '[' mme == mathvista-testmini ']'
++ '[' mme == mathvista-test ']'
++ '[' mme == pope ']'
++ '[' mme == pope_cot ']'
++ '[' mme == vqa-gqa-testdev ']'
++ '[' mme == mmvp ']'

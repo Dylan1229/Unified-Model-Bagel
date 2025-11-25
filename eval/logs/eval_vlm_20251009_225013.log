@@ -1,0 +1,57 @@
+++ pwd
++ export PYTHONPATH=/scr/dataset/yuke/fanjiang/repo/unified-model/Bagel:
++ PYTHONPATH=/scr/dataset/yuke/fanjiang/repo/unified-model/Bagel:
++ export TF_CPP_MIN_LOG_LEVEL=3
++ TF_CPP_MIN_LOG_LEVEL=3
++ export LAUNCHER=pytorch
++ LAUNCHER=pytorch
++ DATASET=mme
++ echo 'CHECKPOINT: '
+CHECKPOINT: 
++ ARGS=("$@")
++ ENABLE_PROFILE=true
++ [[ 5 -gt 0 ]]
++ case "$1" in
++ shift
++ [[ 4 -gt 0 ]]
++ case "$1" in
++ shift
++ [[ 3 -gt 0 ]]
++ case "$1" in
++ shift
++ [[ 2 -gt 0 ]]
++ case "$1" in
++ shift
++ [[ 1 -gt 0 ]]
++ case "$1" in
++ shift
++ [[ 0 -gt 0 ]]
++ echo 'GPUS: 1'
+GPUS: 1
++ echo 'ENABLE_PROFILE: true'
+ENABLE_PROFILE: true
++ '[' mme == mme ']'
++ '[' true = true ']'
+++ date +%Y%m%d_%H%M%S
++ nsys profile --trace=cuda,nvtx,osrt,cudnn,cublas,python --python-sampling=true --gpu-metrics-device=all --gpu-metrics-frequency=5000 --output=/scr/dataset/yuke/fanjiang/repo/unified-model/Bagel/profile/mme_profile_20251009_225014 --force-overwrite=true --capture-range=cudaProfilerApi --capture-range-end=stop python -m eval.vlm.eval.mme.eval --out-dir /scr/dataset/yuke/fanjiang/repo/unified-model/Bagel/results/mme --model-path /scr/dataset/yuke/fanjiang/repo/unified-model/Bagel/models/BAGEL-7B-MoT
+Illegal --trace argument 'python'
+Possible --trace values are one or more of 'cuda', 'nvtx', 'cublas', 'cublas-verbose', 'cusparse', 'cusparse-verbose', 'mpi', 'oshmem', 
+	   'ucx', 'nvvideo', 'osrt', 'cudnn', 'opengl', 'opengl-annotations', 'openacc', 'openmp', 'vulkan', 'vulkan-annotations' or 'none'
+
+usage: nsys profile [<args>] [application] [<application args>]
+Try 'nsys profile --help' for more information.
++ '[' mme == mmvet ']'
++ '[' mme == mmbench-dev-en ']'
++ '[' mme == mmbench-dev-cn ']'
++ '[' mme == mmbench-test-en ']'
++ '[' mme == mmbench-test-cn ']'
++ '[' mme == mmmu-dev ']'
++ '[' mme == mmmu-val ']'
++ '[' mme == mmmu-val_cot ']'
++ '[' mme == mmmu-test ']'
++ '[' mme == mathvista-testmini ']'
++ '[' mme == mathvista-test ']'
++ '[' mme == pope ']'
++ '[' mme == pope_cot ']'
++ '[' mme == vqa-gqa-testdev ']'
++ '[' mme == mmvp ']'

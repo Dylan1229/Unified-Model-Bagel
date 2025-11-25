@@ -1,0 +1,64 @@
+++ pwd
++ export PYTHONPATH=/scr/dataset/yuke/fanjiang/repo/unified-model/Bagel:
++ PYTHONPATH=/scr/dataset/yuke/fanjiang/repo/unified-model/Bagel:
++ export TF_CPP_MIN_LOG_LEVEL=3
++ TF_CPP_MIN_LOG_LEVEL=3
++ export LAUNCHER=pytorch
++ LAUNCHER=pytorch
++ DATASET=mme
++ echo 'CHECKPOINT: '
+CHECKPOINT: 
++ ARGS=("$@")
++ ENABLE_PROFILE=false
++ [[ 5 -gt 0 ]]
++ case "$1" in
++ shift
++ [[ 4 -gt 0 ]]
++ case "$1" in
++ shift
++ [[ 3 -gt 0 ]]
++ case "$1" in
++ shift
++ [[ 2 -gt 0 ]]
++ case "$1" in
++ shift
++ [[ 1 -gt 0 ]]
++ case "$1" in
++ shift
++ [[ 0 -gt 0 ]]
++ echo 'GPUS: 1'
+GPUS: 1
++ '[' mme == mme ']'
++ '[' false = true ']'
++ python -m eval.vlm.eval.mme.eval --out-dir /scr/dataset/yuke/fanjiang/repo/unified-model/Bagel/results/mme --model-path /scr/dataset/yuke/fanjiang/repo/unified-model/Bagel/models/BAGEL-7B-MoT
+_IncompatibleKeys(missing_keys=[], unexpected_keys=['latent_pos_embed.pos_embed', 'llm2vae.bias', 'llm2vae.weight', 'time_embedder.mlp.0.bias', 'time_embedder.mlp.0.weight', 'time_embedder.mlp.2.bias', 'time_embedder.mlp.2.weight', 'vae2llm.bias', 'vae2llm.weight'])
+[test] total_params: 14.578347936B
+  0%|          | 0/5 [00:00<?, ?it/s] 20%|██        | 1/5 [00:00<00:03,  1.22it/s] 40%|████      | 2/5 [00:01<00:01,  1.87it/s] 60%|██████    | 3/5 [00:01<00:00,  2.39it/s] 80%|████████  | 4/5 [00:01<00:00,  2.73it/s]100%|██████████| 5/5 [00:04<00:00,  1.38s/it]100%|██████████| 5/5 [00:04<00:00,  1.02it/s]
+Traceback (most recent call last):
+  File "/hdd/yuke/fanjiang/conda_env/bagel/lib/python3.10/runpy.py", line 196, in _run_module_as_main
+    return _run_code(code, main_globals, None,
+  File "/hdd/yuke/fanjiang/conda_env/bagel/lib/python3.10/runpy.py", line 86, in _run_code
+    exec(code, run_globals)
+  File "/scr/dataset/yuke/fanjiang/repo/unified-model/Bagel/eval/vlm/eval/mme/calculation.py", line 179, in <module>
+    ret_message = cal.process_result(results_dir)
+  File "/scr/dataset/yuke/fanjiang/repo/unified-model/Bagel/eval/vlm/eval/mme/calculation.py", line 120, in process_result
+    assert len(img_items) == 2
+AssertionError
+=========== Perception ===========
+
+Profiling data saved to ./log/profile
++ '[' mme == mmvet ']'
++ '[' mme == mmbench-dev-en ']'
++ '[' mme == mmbench-dev-cn ']'
++ '[' mme == mmbench-test-en ']'
++ '[' mme == mmbench-test-cn ']'
++ '[' mme == mmmu-dev ']'
++ '[' mme == mmmu-val ']'
++ '[' mme == mmmu-val_cot ']'
++ '[' mme == mmmu-test ']'
++ '[' mme == mathvista-testmini ']'
++ '[' mme == mathvista-test ']'
++ '[' mme == pope ']'
++ '[' mme == pope_cot ']'
++ '[' mme == vqa-gqa-testdev ']'
++ '[' mme == mmvp ']'
