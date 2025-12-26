@@ -102,16 +102,10 @@ class _PreparedPlan:
     thinking_text: Optional[str]
 
 def build_scheduler(
-    mode: ParallelMode,
     *,
     inferencer_factory: Callable[[int], InterleaveInferencer],
     diffusion_device: int,
     decode_devices: Optional[List[int]] = None,
 ) -> BaseScheduler:
-    if mode == ParallelMode.DP:
-        return DataParallelScheduler(inferencer_factory(diffusion_device), diffusion_device)
+    return DataParallelScheduler(inferencer_factory(diffusion_device), diffusion_device)
 
-    if mode == ParallelMode.MP:
-        raise NotImplementedError("Model parallel scheduler is not implemented yet.")
-
-    raise ValueError(f"Unsupported parallel mode: {mode}")

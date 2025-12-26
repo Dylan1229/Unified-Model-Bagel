@@ -1,58 +1,51 @@
+# === Path setup ===
+import sys
+from pathlib import Path
+
+_BAGEL_DIR = "/scratch/fy27/repo/sosp26-unified-model/Bagel"
+_INFERENCE_DIR = str(Path(__file__).resolve().parent)
+_ROOT = Path(__file__).resolve().parents[2]
+
+if _BAGEL_DIR not in sys.path:
+    sys.path.insert(0, _BAGEL_DIR)
+if _INFERENCE_DIR not in sys.path:
+    sys.path.insert(0, _INFERENCE_DIR)
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+# === Standard library imports ===
 import argparse
 import copy
 import json
-import sys
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
-
 import time
+from typing import Any, Dict, List, Tuple
+
+# === Third-party imports ===
 import torch
+import torch.distributed as dist
 from PIL import Image
 
-ROOT = Path(__file__).resolve().parents[2]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
-from accelerate import infer_auto_device_map, init_empty_weights, load_checkpoint_and_dispatch
-
-from data.data_utils import add_special_tokens, pil_img2rgb
+# === Project imports ===
 from inferencer import InterleaveInferencer
-from modeling.autoencoder import load_ae
-from modeling.bagel import (
-    Bagel,
-    BagelConfig,
-    Qwen2Config,
-    Qwen2ForCausalLM,
-    SiglipVisionConfig,
-    SiglipVisionModel,
-)
-from modeling.qwen2 import Qwen2Tokenizer
-import torch.distributed as dist
 from multi_task_function import (
     build_image_editing_kwargs,
     build_text_to_image_kwargs,
-    run_image_understanding
+    run_image_understanding,
 )
-
-from scripts.utils.utils import(
+from utils.utils import (
     setup_seed,
     setup_distributed,
     load_model,
     load_tasks,
     finalize_text_results,
-    ensure_path
+    ensure_path,
 )
-
-from scripts.inference_multi.scheduling import (
+from scheduling import (
     ParallelMode,
     TextToImageRequest,
     TextToImageResult,
     build_scheduler,
 )
-try:
-    import yaml  
-except ImportError:  
-    yaml = None
 
 
 def parse_args() -> argparse.Namespace:
@@ -67,15 +60,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--enable_taylorseer", action="store_true", help="Enable TaylorSeer acceleration during generation.")
     parser.add_argument("--local_rank", type=int, default=-1, help="Local rank provided by torchrun for distributed inference.")
     parser.add_argument("--distributed_backend", type=str, default="nccl", help="torch.distributed backend to use when launched with torchrun.")
-    parser.add_argument(
-        "--parallel_mode",
-        type=str,
-        default=ParallelMode.DP.value,
-        choices=[mode.value for mode in ParallelMode],
-        help="Parallel scheduling strategy: DP or MP. Currently,MP is not yet supported.",
-    )
     return parser.parse_args()
-
 
 TEXT_TO_IMAGE_KINDS = {"text2image", "text-to-image"}
 IMAGE_EDITING_KINDS = {"image_editing", "image-editing", "editing"}
@@ -92,9 +77,6 @@ def main() -> None:
         raise RuntimeError("CUDA device is required but not available.")
 
     available_gpus = torch.cuda.device_count()
-    parallel_mode = ParallelMode(args.parallel_mode)
-    if parallel_mode == ParallelMode.MP:
-        raise NotImplementedError("Model parallel inference is not implemented yet.")
 
     # ----------------------Distributed setup--------------------------#
     if distributed:
@@ -170,7 +152,6 @@ def main() -> None:
     primary_text_to_image = primary_inferencer.text_to_image
 
     scheduler = build_scheduler(
-        parallel_mode,
         inferencer_factory=get_inferencer,
         diffusion_device=diffusion_device,
     )
