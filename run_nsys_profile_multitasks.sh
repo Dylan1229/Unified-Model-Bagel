@@ -1,6 +1,7 @@
 #!/bin/bash
 export cuda_visible_devices=1,2,3,4
-project_root="/mnt"
+# project_root="/mnt"
+project_root="./"
 if [[ ":$PYTHONPATH:" != *":$project_root:"* ]]; then
   export PYTHONPATH="$project_root:$PYTHONPATH"
 fi
@@ -14,7 +15,7 @@ nsys profile \
   --force-overwrite=true \
   --stats=true \
   --cuda-memory-usage=true \
-  torchrun --nproc_per_node=2 inference/inference_multi/multi_tasks.py \
+  torchrun --nproc_per_node=2 ./inference/inference_multi/multi_tasks.py \
     --model_path ./models/BAGEL-7B-MoT \
     --tasks ./data_profile/multi_tasks/tasks_mixed.json \
     --output ./results/multi_tasks \

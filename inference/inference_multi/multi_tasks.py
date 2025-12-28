@@ -38,7 +38,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tasks", type=Path, default=None)
     parser.add_argument("--output", type=Path, default=Path("./results/multi_tasks"))
     parser.add_argument("--max_mem_per_gpu", default="80GiB")
-    parser.add_argument("--default_shape", type=int, nargs=2, default=(1024, 1024))
+    parser.add_argument("--default_shape", type=int, nargs=2, default=(512, 512))
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num_gpus", type=int, default=2)
     parser.add_argument("--enable_taylorseer", action="store_true")

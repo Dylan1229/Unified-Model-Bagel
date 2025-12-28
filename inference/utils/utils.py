@@ -274,6 +274,7 @@ def load_model(
     vit_config.num_hidden_layers = vit_config.num_hidden_layers - 1
 
     vae_model, vae_config = load_ae(local_path=os.path.join(model_path, "ae.safetensors"))
+    vae_model = vae_model.to(f"cuda:{device_ids[0]}", dtype=torch.float32).eval()
 
     bagel_config = BagelConfig(
         visual_gen=True,

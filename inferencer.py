@@ -30,10 +30,21 @@ class InterleaveInferencer:
         try:
             param = next(self.vae_model.parameters())
         except StopIteration:
+            print("[VAE DEVICE CHECK] VAE has no parameters")
             return
+
         target_dtype = torch.float32 if device.type == "cuda" else param.dtype
+        moved = False
         if param.device != device or param.dtype != target_dtype:
             self.vae_model = self.vae_model.to(device=device, dtype=target_dtype)
+            moved = True
+
+        param = next(self.vae_model.parameters())
+        print(
+            f"[VAE DEVICE CHECK] device={param.device}, dtype={param.dtype}, "
+            f"target={device}, cuda_current={torch.cuda.current_device() if torch.cuda.is_available() else 'cpu'}, "
+            f"moved={moved}"
+        )
         
     def init_gen_context(self): 
         gen_context = {
@@ -76,6 +87,7 @@ class InterleaveInferencer:
 
         if vae:
             self._ensure_vae_device(torch.device("cuda", torch.cuda.current_device()))
+
             ## update vae
             torch.cuda.nvtx.range_push("vae_encoding")
             generation_input, kv_lens, ropes = self.model.prepare_vae_images(
@@ -131,11 +143,12 @@ class InterleaveInferencer:
         enable_taylorseer=False,
     ):
         # print(cfg_renorm_type)
-        # torch.cuda.nvtx.range_push("Prepare Latent & CFG")
+        torch.cuda.nvtx.range_push("Prepare Latent & CFG")
         past_key_values = gen_context['past_key_values']
         kv_lens = gen_context['kv_lens']
         ropes = gen_context['ropes']
         device = torch.device("cuda", torch.cuda.current_device())
+        
         generation_input = self.model.prepare_vae_latent(
             curr_kvlens=kv_lens,
             curr_rope=ropes, 
@@ -174,7 +187,7 @@ class InterleaveInferencer:
             key: value.to(device=device, non_blocking=True) if isinstance(value, torch.Tensor) else value
             for key, value in generation_input_cfg_img.items()
         }
-        # torch.cuda.nvtx.range_pop()
+        torch.cuda.nvtx.range_pop()
         torch.cuda.nvtx.range_push("Diffusion Process")
         unpacked_latent = self.model.generate_image(
             past_key_values=past_key_values,
@@ -199,13 +212,14 @@ class InterleaveInferencer:
             enable_taylorseer=enable_taylorseer,
         )
         torch.cuda.nvtx.range_pop()
-        torch.cuda.nvtx.range_push("VAE Decode")
+        torch.cuda.nvtx.range_push("Decode Image")
         image = self.decode_image(unpacked_latent[0], image_shape)
         torch.cuda.nvtx.range_pop()
         return image
 
         
     def decode_image(self, latent, image_shape):
+        torch.cuda.nvtx.range_push("[Decode Image]: Ensure VAE Decode Device")
         H, W = image_shape
         h, w = H // self.model.latent_downsample, W // self.model.latent_downsample
         
@@ -213,19 +227,25 @@ class InterleaveInferencer:
         if torch.cuda.is_available():
             target_device = torch.device("cuda", torch.cuda.current_device())
         else:
-            target_device = torch.device("cpu")
-
+            print("CUDA is not available. Using CPU for VAE decoding.")
         # 1. Force the latent to the target GPU
         if latent.device != target_device:
             latent = latent.to(target_device, non_blocking=True)
             
         # 2. Force the VAE model to the target GPU
         self._ensure_vae_device(target_device)
-
+        param = next(self.vae_model.parameters(), None)
+        if param is not None and param.device != target_device:
+            self.vae_model = self.vae_model.to(target_device)
+        torch.cuda.nvtx.range_pop()
+        
+        torch.cuda.nvtx.range_push("[Decode Image]: VAE Reshape")
         latent = latent.reshape(1, h, w, self.model.latent_patch_size, self.model.latent_patch_size, self.model.latent_channel)
         latent = torch.einsum("nhwpqc->nchpwq", latent)
         latent = latent.reshape(1, self.model.latent_channel, h * self.model.latent_patch_size, w * self.model.latent_patch_size)
+        torch.cuda.nvtx.range_pop()
         
+        torch.cuda.nvtx.range_push("[Decode Image]: VAE Decode")
         # Correctly get the parameter to check dtype
         param = next(self.vae_model.parameters(), None)
 
@@ -233,9 +253,11 @@ class InterleaveInferencer:
             latent = latent.to(param.dtype)
             
         image = self.vae_model.decode(latent)
+        torch.cuda.nvtx.range_pop()
+        torch.cuda.nvtx.range_push("[Decode Image]: VAE Postprocess")
         image = (image * 0.5 + 0.5).clamp(0, 1)[0].permute(1, 2, 0) * 255
         image = Image.fromarray((image).to(torch.uint8).cpu().numpy())
-
+        torch.cuda.nvtx.range_pop()
         return image
 
     @torch.no_grad()
@@ -283,8 +305,7 @@ class InterleaveInferencer:
         cfg_text_context = deepcopy(gen_context)
         cfg_img_context = deepcopy(gen_context)
 
-        if torch.cuda.is_available():
-            self._ensure_vae_device(torch.device("cuda", torch.cuda.current_device()))
+        self._ensure_vae_device(torch.device("cuda", torch.cuda.current_device()))
 
         with torch.autocast(device_type="cuda", enabled=True, dtype=torch.bfloat16):
 
