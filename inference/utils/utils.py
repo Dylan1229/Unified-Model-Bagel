@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
+import torch.distributed as dist
 from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -16,9 +17,8 @@ if str(ROOT) not in sys.path:
 
 from accelerate import infer_auto_device_map, init_empty_weights, load_checkpoint_and_dispatch
 
-from data.data_utils import add_special_tokens, pil_img2rgb
+from data.data_utils import add_special_tokens
 from data.transforms import ImageTransform
-from inferencer import InterleaveInferencer
 from modeling.autoencoder import load_ae
 from modeling.bagel import (
     Bagel,
@@ -29,13 +29,16 @@ from modeling.bagel import (
     SiglipVisionModel,
 )
 from modeling.qwen2 import Qwen2Tokenizer
-import torch.distributed as dist
 
 try:
     import yaml  # type: ignore
-except ImportError:  # pragma: no cover - pip requirement already present
+except ImportError:
     yaml = None
 
+
+# ****************************************************************************
+# * DATA STRUCTURES                               *
+# ****************************************************************************
 
 @dataclass
 class TaskSpec:
@@ -62,7 +65,10 @@ class DistributedContext:
     world_size: int
     local_rank: int
 
-# ********************************** Checking filenames & paths ****************************** #
+
+# ****************************************************************************
+# * PATH & FILE HELPERS                             *
+# ****************************************************************************
 
 def sanitize_filename(text: str, max_length: int = 50) -> str:
     safe = "".join(ch if ch.isalnum() or ch in "-._" else "_" for ch in text.strip())
@@ -81,7 +87,12 @@ def ensure_path(path: Optional[Path], fallback_stem: str, base_dir: Path, suffix
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
 
-def parse_task_payload(payload: Dict[str, Any],output_dir: Path):
+
+# ****************************************************************************
+# * TASK PARSING                                 *
+# ****************************************************************************
+
+def parse_task_payload(payload: Dict[str, Any], output_dir: Path) -> TaskSpec:
     task_id = payload.get("task_id") or payload.get("id") or ""
     prompt = payload.get("prompt")
     kind = (payload.get("type") or payload.get("kind") or "").lower()
@@ -120,40 +131,11 @@ def parse_task_payload(payload: Dict[str, Any],output_dir: Path):
         image_shape=image_shape,
     )
 
-# ********************************** setup seed and setup seed for distributed settings ****************************** #
 
-def setup_seed(seed: Optional[int]) -> None:
-    if seed is None or seed < 0:
-        return
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    
-def setup_distributed(local_rank_arg):
-    if not dist.is_available():
-        return DistributedContext(False, 0, 1, max(local_rank_arg, 0))
-
-    env_rank = os.environ.get("RANK")
-    env_world = os.environ.get("WORLD_SIZE")
-    if env_rank is None or env_world is None:
-        return DistributedContext(False, 0, 1, max(local_rank_arg, 0))
-
-    env_local = os.environ.get("LOCAL_RANK")
-    local_rank = local_rank_arg if local_rank_arg >= 0 else int(env_local or env_rank)
-    rank = int(env_rank)
-    world_size = int(env_world)
-
-    return DistributedContext(world_size > 1, rank, world_size, local_rank)
-
-# ********************************** Task/Model Loading ****************************** #
-
-def load_tasks(task_file: Optional[Path], output_dir: Path):
+def load_tasks(task_file: Optional[Path], output_dir: Path) -> List[TaskSpec]:
     tasks: List[TaskSpec] = []
+    
+    # 1. Fallback to Demo tasks if no file provided
     if task_file is None:
         demo_tasks = [
             {
@@ -161,12 +143,7 @@ def load_tasks(task_file: Optional[Path], output_dir: Path):
                 "type": "text2image",
                 "prompt": "A futuristic tram gliding through a neon-lit city at dusk, cinematic lighting, wide shot.",
                 "think": True,
-                "params": {
-                    "max_think_token_n": 512,
-                    "cfg_text_scale": 4.0,
-                    "cfg_interval": 0.4,
-                    "num_timesteps": 50,
-                },
+                "params": {"max_think_token_n": 512, "cfg_text_scale": 4.0, "cfg_interval": 0.4},
             },
             {
                 "task_id": "demo-image-understanding",
@@ -174,16 +151,14 @@ def load_tasks(task_file: Optional[Path], output_dir: Path):
                 "prompt": "Describe the scene and summarize why it is humorous.",
                 "image": str((".." / "images" / "bike.jpg").resolve()),
                 "think": False,
-                "params": {
-                    "max_think_token_n": 512,
-                    "do_sample": False,
-                },
+                "params": {"do_sample": False},
             },
         ]
         for entry in demo_tasks:
             tasks.append(parse_task_payload(entry, output_dir))
         return tasks
 
+    # 2. Load from File
     task_file = task_file.expanduser().resolve()
     if not task_file.exists():
         raise FileNotFoundError(f"Task file not found: {task_file}")
@@ -204,6 +179,62 @@ def load_tasks(task_file: Optional[Path], output_dir: Path):
         tasks.append(parse_task_payload(entry, output_dir))
     return tasks
 
+
+# ****************************************************************************
+# * SETUP & INITIALIZATION                             *
+# ****************************************************************************
+
+def setup_seed(seed: Optional[int]) -> None:
+    if seed is None or seed < 0:
+        return
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+def setup_distributed(local_rank_arg: int) -> DistributedContext:
+    """Sets up distributed training."""
+
+    if not dist.is_available():
+        return DistributedContext(False, 0, 1, max(local_rank_arg, 0))
+
+    env_rank = os.environ.get("RANK")
+    env_world = os.environ.get("WORLD_SIZE")
+    if env_rank is None or env_world is None:
+        return DistributedContext(False, 0, 1, max(local_rank_arg, 0))
+
+    env_local = os.environ.get("LOCAL_RANK")
+    local_rank = local_rank_arg if local_rank_arg >= 0 else int(env_local or env_rank)
+    rank = int(env_rank)
+    world_size = int(env_world)
+
+    return DistributedContext(world_size > 1, rank, world_size, local_rank)
+
+
+# ****************************************************************************
+# * MODEL LOADING                                 *
+# ****************************************************************************
+
+def _helper_device_to_str(value: Any) -> Optional[str]:
+    """Helper to convert torch devices or ints to string representation."""
+
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    if isinstance(value, torch.device):
+        if value.type == "cuda" and value.index is not None:
+            return f"cuda:{value.index}"
+        return value.type
+    if isinstance(value, int):
+        return f"cuda:{value}"
+    return str(value)
+
+
 def load_model(
     model_path: str,
     max_mem_per_gpu: str = "80GiB",
@@ -211,16 +242,18 @@ def load_model(
     device_ids: Optional[List[int]] = None,
     offload_dir: Optional[Path] = None,
 ):
-    # ----------------------Robust GPU Selection--------------------------#
     available_gpus = torch.cuda.device_count()
     if available_gpus == 0:
         raise RuntimeError("CUDA device is required but not available.")
+    
+    # [Optim] A100/H100 optimization
+    torch.set_float32_matmul_precision('high')
 
-    if device_ids is not None and len(device_ids) == 0:
-        raise ValueError("device_ids must contain at least one GPU index.")
-
+    # 1. Device Selection Logic
     if device_ids is not None:
-        normalized_ids: List[int] = sorted(set(int(idx) for idx in device_ids))
+        if len(device_ids) == 0:
+            raise ValueError("device_ids must contain at least one GPU index.")
+        normalized_ids = sorted(set(int(idx) for idx in device_ids))
         for idx in normalized_ids:
             if idx < 0 or idx >= available_gpus:
                 raise ValueError(f"Invalid GPU index {idx}. Available GPUs: {available_gpus}")
@@ -231,9 +264,8 @@ def load_model(
         else:
             num_gpus = min(num_gpus, available_gpus)
         device_ids = list(range(num_gpus))
-        
-     # ----------------------Model Initialization--------------------------#
-    num_selected_gpus = len(device_ids)
+
+    # 2. Load Configs
     llm_config = Qwen2Config.from_json_file(os.path.join(model_path, "llm_config.json"))
     llm_config.qk_norm = True
     llm_config.tie_word_embeddings = False
@@ -245,7 +277,7 @@ def load_model(
 
     vae_model, vae_config = load_ae(local_path=os.path.join(model_path, "ae.safetensors"))
 
-    config = BagelConfig(
+    bagel_config = BagelConfig(
         visual_gen=True,
         visual_und=True,
         llm_config=llm_config,
@@ -257,10 +289,11 @@ def load_model(
         max_latent_size=64,
     )
 
+    # 3. Initialize Empty Weights
     with init_empty_weights():
         language_model = Qwen2ForCausalLM(llm_config)
         vit_model = SiglipVisionModel(vit_config)
-        model = Bagel(language_model, vit_model, config)
+        model = Bagel(language_model, vit_model, bagel_config)
         model.vit_model.vision_model.embeddings.convert_conv2d_to_linear(vit_config, meta=True)
 
     tokenizer = Qwen2Tokenizer.from_pretrained(model_path)
@@ -269,12 +302,14 @@ def load_model(
     vae_transform = ImageTransform(1024, 512, 16)
     vit_transform = ImageTransform(980, 224, 14)
 
+    # 4. Infer Device Map
     device_map = infer_auto_device_map(
         model,
         max_memory={i: max_mem_per_gpu for i in device_ids},
         no_split_module_classes=["Bagel", "Qwen2MoTDecoderLayer"],
     )
 
+    # Force specific modules to share devices
     same_device_modules = [
         "language_model.model.embed_tokens",
         "time_embedder",
@@ -284,34 +319,29 @@ def load_model(
         "connector",
         "vit_pos_embed",
     ]
-
-    def _device_to_str(value: Any) -> Optional[str]:
-        if value is None:
-            return None
-        if isinstance(value, str):
-            return value
-        if isinstance(value, torch.device):
-            if value.type == "cuda" and value.index is not None:
-                return f"cuda:{value.index}"
-            return value.type
-        if isinstance(value, int):
-            return f"cuda:{value}"
-        return str(value)
-
+    
+    num_selected_gpus = len(device_ids)
+    first_device = _helper_device_to_str(device_map.get(same_device_modules[0])) or f"cuda:{device_ids[0]}"
+    
     if num_selected_gpus == 1:
-        default_device = f"cuda:{device_ids[0]}"
-        first_device = _device_to_str(device_map.get(same_device_modules[0])) or default_device
+        # If single GPU, everything goes to first_device if not mapped
         for module in same_device_modules:
-            device_map[module] = _device_to_str(device_map.get(module)) or first_device
+            device_map[module] = _helper_device_to_str(device_map.get(module)) or first_device
     else:
-        first_device = _device_to_str(device_map.get(same_device_modules[0])) or f"cuda:{device_ids[0]}"
+        # If multi-GPU, force modules to follow the first one found
         for module in same_device_modules:
             if module in device_map:
                 device_map[module] = first_device
 
-    offload_path = Path(offload_dir or "/tmp/offload")
+    # 5. Handle Offload Directory (PID Fix)
+    if offload_dir is None:
+        # Use a unique temporary directory for this specific process (PID)
+        offload_path = Path(f"/tmp/offload_{os.getpid()}")
+    else:
+        offload_path = Path(offload_dir)
     offload_path.mkdir(parents=True, exist_ok=True)
 
+    # 6. Load Checkpoint
     model = load_checkpoint_and_dispatch(
         model,
         checkpoint=os.path.join(model_path, "ema.safetensors"),
@@ -322,51 +352,11 @@ def load_model(
         offload_folder=str(offload_path),
     ).eval()
 
-    used_devices = set()
-    for device in device_map.values():
-        if isinstance(device, str):
-            if device.startswith("cuda"):
-                used_devices.add(device)
-        elif isinstance(device, int):
-            used_devices.add(f"cuda:{device}")
-    used_devices = sorted(used_devices)
+    # 7. Reporting
+    used_devices = sorted({
+        val if isinstance(val, str) and val.startswith("cuda") else f"cuda:{val}" 
+        for val in device_map.values() if isinstance(val, (str, int))
+    })
     print(f"Model shards placed on GPUs: {used_devices or [f'cuda:{i}' for i in device_ids]}")
 
     return model, vae_model, tokenizer, vae_transform, vit_transform, new_token_ids
-
-# ********************************** Result Finalization ****************************** #
-
-def finalize_text_results(results, summary_records, output_dir):
-    for outcome in results:
-        if outcome.error:
-            raise RuntimeError(
-                f"Text-to-image task '{outcome.task.task_id}' failed."
-            ) from outcome.error
-        image = outcome.image
-        if image is None:
-            raise RuntimeError(f"No image returned for task '{outcome.task.task_id}'")
-        image_path = ensure_path(outcome.task.output_image, outcome.task.task_id, output_dir, ".png")
-        image.save(image_path)
-
-        thinking_path = None
-        if outcome.thinking_text:
-            thinking_path = ensure_path(
-                outcome.task.output_text,
-                f"{outcome.task.task_id}_thinking",
-                output_dir,
-                ".txt",
-            )
-            thinking_path.write_text(outcome.thinking_text, encoding="utf-8")
-
-        summary_records.append(
-            (
-                outcome.task_index,
-                {
-                    "task_id": outcome.task.task_id,
-                    "type": outcome.task.kind,
-                    "prompt": outcome.task.prompt,
-                    "image_path": str(image_path),
-                    "thinking_path": str(thinking_path) if thinking_path else None,
-                },
-            )
-        )
