@@ -23,6 +23,14 @@ from modeling.cache_utils.taylorseer import cache_init
 
 from tqdm import tqdm
 
+# Patch-based diffusion utilities
+from inference.utils.patch_utils import (
+    PatchInfo,
+    compute_patch_grid,
+    split_latent_to_patches,
+    concat_patches_to_latent,
+)
+
 
 class BagelConfig(PretrainedConfig):
     def __init__(
@@ -678,7 +686,52 @@ class Bagel(PreTrainedModel):
         cfg_type: str = "parallel",
         # cache_args
         enable_taylorseer=False,
+        # patch-based diffusion args
+        is_sliced: bool = False,
+        patch_size: int = 256,
+        image_sizes: Optional[List[Tuple[int, int]]] = None,
+        new_token_ids: Optional[Dict[str, int]] = None,
     ):
+        # Dispatch to patched version if is_sliced=True
+        if is_sliced and image_sizes is not None and new_token_ids is not None:
+            return self._generate_image_patched(
+                packed_text_ids=packed_text_ids,
+                packed_text_indexes=packed_text_indexes,
+                packed_init_noises=packed_init_noises,
+                packed_vae_position_ids=packed_vae_position_ids,
+                packed_vae_token_indexes=packed_vae_token_indexes,
+                packed_seqlens=packed_seqlens,
+                packed_position_ids=packed_position_ids,
+                packed_indexes=packed_indexes,
+                past_key_values=past_key_values,
+                key_values_lens=key_values_lens,
+                packed_key_value_indexes=packed_key_value_indexes,
+                num_timesteps=num_timesteps,
+                timestep_shift=timestep_shift,
+                cfg_renorm_min=cfg_renorm_min,
+                cfg_renorm_type=cfg_renorm_type,
+                cfg_interval=cfg_interval,
+                cfg_text_scale=cfg_text_scale,
+                cfg_text_packed_query_indexes=cfg_text_packed_query_indexes,
+                cfg_text_packed_position_ids=cfg_text_packed_position_ids,
+                cfg_text_past_key_values=cfg_text_past_key_values,
+                cfg_text_key_values_lens=cfg_text_key_values_lens,
+                cfg_text_packed_key_value_indexes=cfg_text_packed_key_value_indexes,
+                cfg_img_scale=cfg_img_scale,
+                cfg_img_packed_query_indexes=cfg_img_packed_query_indexes,
+                cfg_img_packed_position_ids=cfg_img_packed_position_ids,
+                cfg_img_past_key_values=cfg_img_past_key_values,
+                cfg_img_key_values_lens=cfg_img_key_values_lens,
+                cfg_img_packed_key_value_indexes=cfg_img_packed_key_value_indexes,
+                cfg_type=cfg_type,
+                enable_taylorseer=enable_taylorseer,
+                # patch-based diffusion args
+                patch_size=patch_size,
+                image_sizes=image_sizes,
+                new_token_ids=new_token_ids,
+            )
+        
+        # Original non-patched implementation
         if enable_taylorseer:
             self.language_model.model.enable_taylorseer = True
             model_pred_cache_dic, model_pred_current = cache_init(self, num_timesteps)
@@ -754,6 +807,507 @@ class Bagel(PreTrainedModel):
 
         unpacked_latent = x_t.split((packed_seqlens - 2).tolist())
         return unpacked_latent
+
+    @torch.no_grad
+    def _generate_image_patched(
+        self,
+        packed_text_ids: torch.LongTensor,
+        packed_text_indexes: torch.LongTensor,
+        packed_init_noises: torch.Tensor,
+        packed_vae_position_ids: torch.LongTensor,
+        packed_vae_token_indexes: torch.LongTensor,
+        packed_seqlens: torch.IntTensor,
+        packed_position_ids: torch.LongTensor,
+        packed_indexes: torch.LongTensor,
+        past_key_values: NaiveCache,
+        key_values_lens: torch.IntTensor,
+        packed_key_value_indexes: torch.LongTensor,
+        num_timesteps: int,
+        timestep_shift: float,
+        cfg_renorm_min: float,
+        cfg_renorm_type: str,
+        cfg_interval: Tuple[float, float],
+        # cfg_text
+        cfg_text_scale: float,
+        cfg_text_packed_query_indexes: torch.LongTensor,
+        cfg_text_packed_position_ids: torch.LongTensor,
+        cfg_text_past_key_values: NaiveCache,
+        cfg_text_key_values_lens: torch.IntTensor,
+        cfg_text_packed_key_value_indexes: torch.LongTensor,
+        # cfg_img
+        cfg_img_scale: float,
+        cfg_img_packed_query_indexes: torch.LongTensor,
+        cfg_img_packed_position_ids: torch.LongTensor,
+        cfg_img_past_key_values: NaiveCache,
+        cfg_img_key_values_lens: torch.IntTensor,
+        cfg_img_packed_key_value_indexes: torch.LongTensor,
+        cfg_type: str,
+        enable_taylorseer: bool,
+        # patch-specific args
+        patch_size: int,
+        image_sizes: List[Tuple[int, int]],
+        new_token_ids: Dict[str, int],
+    ):
+        """
+        Patch-based image generation.
+
+        1. x_t (full latent) + position_embed + timestep_embed → embedded_full
+        2. Split embedded_full into patches
+        3. Process patches through transformer (sharing text KV-cache)
+        4. Concat patches back to full
+        5. Convert back to latent space
+        """
+        device = packed_init_noises.device
+        
+        # Keep x_t as FULL latent throughout diffusion (not split yet)
+        x_t = packed_init_noises  # Shape: (total_tokens, latent_dim)
+        
+        # Compute patch grid info (for splitting later)
+        H, W = image_sizes[0]  # Assuming single image for now
+        latent_h = H // self.latent_downsample
+        latent_w = W // self.latent_downsample
+        patches_h, patches_w, latent_ps = compute_patch_grid(
+            latent_h, latent_w, patch_size, self.latent_downsample
+        )
+        num_patches = patches_h * patches_w
+        tokens_per_patch = latent_ps * latent_ps
+
+        # TaylorSeer setup
+        if enable_taylorseer:
+            self.language_model.model.enable_taylorseer = True
+            model_pred_cache_dic, model_pred_current = cache_init(self, num_timesteps)
+            model_pred_text_cache_dic, model_pred_text_current = cache_init(self, num_timesteps)
+            model_pred_img_cache_dic, model_pred_img_current = cache_init(self, num_timesteps)
+        else:
+            self.language_model.model.enable_taylorseer = False
+            model_pred_cache_dic, model_pred_current = None, None
+            model_pred_text_cache_dic, model_pred_text_current = None, None
+            model_pred_img_cache_dic, model_pred_img_current = None, None
+
+        # Timestep schedule
+        timesteps = torch.linspace(1, 0, num_timesteps, device=device)
+        timesteps = timestep_shift * timesteps / (1 + (timestep_shift - 1) * timesteps)
+        dts = timesteps[:-1] - timesteps[1:]
+        timesteps = timesteps[:-1]
+
+        # Diffusion loop - x_t stays as FULL latent
+        # All patches in ONE sequence so they can attend to each other!
+        for i, t in tqdm(enumerate(timesteps), total=len(timesteps), desc="Patched Diffusion"):
+            timestep = torch.tensor([t] * x_t.shape[0], device=device)
+            
+            if t > cfg_interval[0] and t <= cfg_interval[1]:
+                cfg_text_scale_ = cfg_text_scale
+                cfg_img_scale_ = cfg_img_scale
+            else:
+                cfg_text_scale_ = 1.0
+                cfg_img_scale_ = 1.0
+
+            # Forward flow: position embedding FIRST, then split, but ALL patches
+            # in ONE sequence for cross-patch attention
+            v_t = self._forward_flow_patched(
+                x_t=x_t,  # Full latent
+                timestep=timestep,
+                packed_vae_position_ids=packed_vae_position_ids,  # Full position IDs
+                image_sizes=image_sizes,
+                patch_size=patch_size,
+                num_patches=num_patches,
+                tokens_per_patch=tokens_per_patch,
+                new_token_ids=new_token_ids,
+                # KV cache (original, not expanded - we have one unified sequence)
+                past_key_values=past_key_values,
+                cfg_renorm_min=cfg_renorm_min,
+                cfg_renorm_type=cfg_renorm_type,
+                # cfg_text
+                cfg_text_scale=cfg_text_scale_,
+                cfg_text_past_key_values=cfg_text_past_key_values,
+                # cfg_img
+                cfg_img_scale=cfg_img_scale_,
+                cfg_img_past_key_values=cfg_img_past_key_values,
+                # cache
+                model_pred_cache_dic=model_pred_cache_dic,
+                model_pred_current=model_pred_current,
+                model_pred_text_cache_dic=model_pred_text_cache_dic,
+                model_pred_text_current=model_pred_text_current,
+                model_pred_img_cache_dic=model_pred_img_cache_dic,
+                model_pred_img_current=model_pred_img_current,
+            )
+
+            x_t = x_t - v_t.to(device) * dts[i]
+
+        if enable_taylorseer:
+            del model_pred_cache_dic, model_pred_current
+            del model_pred_text_cache_dic, model_pred_text_current
+            del model_pred_img_cache_dic, model_pred_img_current
+
+        # x_t is already full latent, just return it
+        packed_latent = x_t
+        
+        # Split by image (same as original)
+        unpacked_latent = packed_latent.split((packed_seqlens - 2).tolist())
+        return unpacked_latent
+
+    def _expand_kv_cache(self, kv_cache: NaiveCache, num_patches: int) -> NaiveCache:
+        """Expand KV cache by repeating it for each patch."""
+        if kv_cache is None:
+            return None
+        expanded = NaiveCache(kv_cache.num_layers)
+        for layer_idx in range(kv_cache.num_layers):
+            if kv_cache.key_cache[layer_idx] is not None:
+                # Repeat along sequence dimension (dim 0)
+                expanded.key_cache[layer_idx] = kv_cache.key_cache[layer_idx].repeat(num_patches, 1, 1)
+                expanded.value_cache[layer_idx] = kv_cache.value_cache[layer_idx].repeat(num_patches, 1, 1)
+        return expanded
+
+    def _create_patch_position_ids(
+        self,
+        packed_vae_position_ids: torch.LongTensor,
+        image_sizes: List[Tuple[int, int]],
+        patch_info: PatchInfo,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """
+        Create position IDs for each patch by extracting from the full position IDs.
+        """
+        all_patch_pos_ids = []
+        token_offset = 0
+        patch_idx = 0
+        
+        for img_idx, (H, W) in enumerate(image_sizes):
+            latent_h = H // self.latent_downsample
+            latent_w = W // self.latent_downsample
+            num_tokens = latent_h * latent_w
+            
+            # Get this image's position IDs
+            img_pos_ids = packed_vae_position_ids[token_offset:token_offset + num_tokens]
+            img_pos_ids_2d = img_pos_ids.view(latent_h, latent_w)
+            
+            patches_h, patches_w, latent_ps = compute_patch_grid(
+                latent_h, latent_w, 
+                patch_info.latent_patch_size * self.latent_downsample,
+                self.latent_downsample
+            )
+            
+            for ph in range(patches_h):
+                for pw in range(patches_w):
+                    h_start = ph * latent_ps
+                    h_end = min((ph + 1) * latent_ps, latent_h)
+                    w_start = pw * latent_ps
+                    w_end = min((pw + 1) * latent_ps, latent_w)
+                    
+                    patch_pos_ids = img_pos_ids_2d[h_start:h_end, w_start:w_end].flatten()
+                    all_patch_pos_ids.append(patch_pos_ids)
+                    patch_idx += 1
+            
+            token_offset += num_tokens
+        
+        # Pad to same length
+        max_len = max(p.shape[0] for p in all_patch_pos_ids)
+        padded_pos_ids = []
+        for pos_ids in all_patch_pos_ids:
+            if pos_ids.shape[0] < max_len:
+                # Use a valid position ID for padding (e.g., 0)
+                padding = torch.zeros(max_len - pos_ids.shape[0], dtype=pos_ids.dtype, device=device)
+                pos_ids = torch.cat([pos_ids, padding], dim=0)
+            padded_pos_ids.append(pos_ids)
+        
+        return torch.stack(padded_pos_ids, dim=0)  # (num_patches, max_tokens)
+
+    @torch.no_grad
+    def _forward_flow_patched(
+        self,
+        x_t: torch.Tensor,  # Full latent, not patched
+        timestep: torch.Tensor,
+        packed_vae_position_ids: torch.LongTensor,  # Full position IDs
+        image_sizes: List[Tuple[int, int]],
+        patch_size: int,
+        num_patches: int,
+        tokens_per_patch: int,
+        new_token_ids: Dict[str, int],
+        # KV cache
+        past_key_values: NaiveCache,
+        cfg_renorm_min: float,
+        cfg_renorm_type: str,
+        # cfg_text
+        cfg_text_scale: float,
+        cfg_text_past_key_values: Optional[NaiveCache],
+        # cfg_img
+        cfg_img_scale: float,
+        cfg_img_past_key_values: Optional[NaiveCache],
+        # cache
+        model_pred_cache_dic: Optional[Dict[str, Any]],
+        model_pred_current: Optional[int],
+        model_pred_text_cache_dic: Optional[Dict[str, Any]],
+        model_pred_text_current: Optional[int],
+        model_pred_img_cache_dic: Optional[Dict[str, Any]],
+        model_pred_img_current: Optional[int],
+    ):
+        """
+        Forward flow for patch-based diffusion (ESyMReD-style).
+        
+        Key difference from original: Position embeddings are added to the FULL latent
+        BEFORE splitting into patches. This ensures correct global position information.
+        
+        Flow:
+        1. vae2llm(x_t) + pos_embed + timestep_embed on FULL latent
+        2. Split embedded latent into patches
+        3. Process patches through transformer
+        4. Concat patches back to full
+        5. llm2vae to get velocity
+        """
+        device = x_t.device
+        
+        # ============================================================
+        # Step 1: Add embeddings to FULL latent BEFORE splitting
+        # ============================================================
+        
+        # Position embeddings on FULL latent
+        packed_pos_embed = self.latent_pos_embed(packed_vae_position_ids)
+        
+        # Timestep embedding (same for all tokens)
+        packed_timestep_embeds = self.time_embedder(timestep)
+        
+        # Convert dtypes
+        vae2llm_dtype = self.vae2llm.weight.dtype
+        x_t_work = x_t.to(dtype=vae2llm_dtype) if x_t.dtype != vae2llm_dtype else x_t
+        if packed_timestep_embeds.dtype != vae2llm_dtype:
+            packed_timestep_embeds = packed_timestep_embeds.to(dtype=vae2llm_dtype)
+        if packed_pos_embed.dtype != vae2llm_dtype:
+            packed_pos_embed = packed_pos_embed.to(dtype=vae2llm_dtype)
+        
+        # Embed FULL latent: vae2llm + position + timestep
+        x_t_embedded_full = self.vae2llm(x_t_work) + packed_timestep_embeds + packed_pos_embed
+        
+        # ============================================================
+        # Step 2: Split embedded latent into patches
+        # ============================================================
+        
+        patched_embedded, patch_info = split_latent_to_patches(
+            packed_latent=x_t_embedded_full,
+            image_sizes=image_sizes,
+            patch_size=patch_size,
+            latent_downsample=self.latent_downsample,
+            latent_channel=self.latent_channel,
+            latent_patch_size_model=self.latent_patch_size,
+            device=device,
+        )
+        # patched_embedded: (num_patches, tokens_per_patch, hidden_size)
+        
+        # Flatten for indexing: (num_patches * tokens_per_patch, hidden_size)
+        patched_embedded_flat = patched_embedded.view(-1, self.hidden_size)
+        
+        # ============================================================
+        # Step 3: Build per-patch sequences for patched forward
+        # ============================================================
+        # Each patch has: [start_of_image] + [patch_vae_tokens] + [end_of_image]
+        # Non-attention ops are done per-patch, attention sees all patches
+        
+        # Embed text markers
+        text_marker_ids = torch.tensor(
+            [new_token_ids['start_of_image'], new_token_ids['end_of_image']],
+            dtype=torch.long, device=device
+        )
+        text_marker_embedding = self.language_model.model.embed_tokens(text_marker_ids)
+        start_embed = text_marker_embedding[0:1]  # (1, hidden_size)
+        end_embed = text_marker_embedding[1:2]    # (1, hidden_size)
+        
+        # Build per-patch sequences
+        patch_sequences = []
+        patch_position_ids = []
+        patch_vae_indexes = []
+        patch_text_indexes = []
+        
+        # patched_embedded: (num_patches, tokens_per_patch, hidden_size)
+        for p in range(num_patches):
+            # Get this patch's embedded VAE tokens
+            patch_vae_tokens = patched_embedded[p]  # (tokens_per_patch, hidden_size)
+            if patch_vae_tokens.dtype != start_embed.dtype:
+                patch_vae_tokens = patch_vae_tokens.to(start_embed.dtype)
+            
+            # Build sequence: [start] + [vae_tokens] + [end]
+            patch_seq = torch.cat([start_embed, patch_vae_tokens, end_embed], dim=0)
+            patch_sequences.append(patch_seq)
+            
+            # Position IDs for this patch (all same position for RoPE)
+            patch_len = patch_seq.shape[0]
+            patch_pos = torch.zeros(patch_len, dtype=torch.long, device=device)
+            patch_position_ids.append(patch_pos)
+            
+            # Indexes within this patch
+            # VAE tokens are at positions 1 to tokens_per_patch (inclusive)
+            patch_vae_idx = torch.arange(1, tokens_per_patch + 1, dtype=torch.long, device=device)
+            patch_vae_indexes.append(patch_vae_idx)
+            
+            # Text tokens are at positions 0 and tokens_per_patch + 1
+            patch_text_idx = torch.tensor([0, tokens_per_patch + 1], dtype=torch.long, device=device)
+            patch_text_indexes.append(patch_text_idx)
+        
+        # ============================================================
+        # Step 4: Forward through transformer with patched method
+        # ============================================================
+        # Non-attention ops (LayerNorm, MLP) are done per-patch
+        # Attention is done with all patches together
+        
+        if self.language_model.model.enable_taylorseer:
+            self.language_model.model.cache_dic = model_pred_cache_dic
+            self.language_model.model.current = model_pred_current
+        
+        orig_kv_len = past_key_values.seq_lens
+        if isinstance(orig_kv_len, torch.Tensor):
+            orig_kv_len = orig_kv_len.item() if orig_kv_len.numel() == 1 else orig_kv_len[0].item()
+        
+        output_sequences = self.language_model.forward_inference_patched(
+            patch_sequences=patch_sequences,
+            patch_position_ids=patch_position_ids,
+            patch_vae_indexes=patch_vae_indexes,
+            patch_text_indexes=patch_text_indexes,
+            past_key_values=past_key_values,
+            past_key_values_len=orig_kv_len,
+            update_past_key_values=False,
+            is_causal=False,
+            mode="gen",
+        )
+        
+        # Extract VAE token outputs from each patch and convert to latent space
+        patch_v_t_list = []
+        for p, (out_seq, vae_idx) in enumerate(zip(output_sequences, patch_vae_indexes)):
+            patch_vae_out = out_seq[vae_idx]  # (tokens_per_patch, hidden_size)
+            patch_v_t = self.llm2vae(patch_vae_out)  # (tokens_per_patch, latent_dim)
+            patch_v_t_list.append(patch_v_t)
+        
+        # Stack all patches: (num_patches, tokens_per_patch, latent_dim)
+        vae_v_t_3d = torch.stack(patch_v_t_list, dim=0)
+        
+        # ============================================================
+        # Step 5: Concat patches back to full latent
+        # ============================================================
+        
+        v_t = concat_patches_to_latent(
+            patched_latent=vae_v_t_3d,
+            patch_info=patch_info,
+            image_sizes=image_sizes,
+            latent_downsample=self.latent_downsample,
+            latent_channel=self.latent_channel,
+            latent_patch_size_model=self.latent_patch_size,
+        )
+        
+        # ============================================================
+        # CFG - text scale (patched approach)
+        # ============================================================
+        if cfg_text_scale > 1.0 and cfg_text_past_key_values is not None:
+            if self.language_model.model.enable_taylorseer:
+                self.language_model.model.cache_dic = model_pred_text_cache_dic
+                self.language_model.model.current = model_pred_text_current
+            
+            cfg_text_kv_len = cfg_text_past_key_values.seq_lens
+            if isinstance(cfg_text_kv_len, torch.Tensor):
+                cfg_text_kv_len = cfg_text_kv_len.item() if cfg_text_kv_len.numel() == 1 else cfg_text_kv_len[0].item()
+            
+            cfg_text_output_seqs = self.language_model.forward_inference_patched(
+                patch_sequences=patch_sequences,
+                patch_position_ids=patch_position_ids,
+                patch_vae_indexes=patch_vae_indexes,
+                patch_text_indexes=patch_text_indexes,
+                past_key_values=cfg_text_past_key_values,
+                past_key_values_len=cfg_text_kv_len,
+                update_past_key_values=False,
+                is_causal=False,
+                mode="gen",
+            )
+            
+            cfg_text_patch_v_t_list = []
+            for p, (out_seq, vae_idx) in enumerate(zip(cfg_text_output_seqs, patch_vae_indexes)):
+                patch_vae_out = out_seq[vae_idx]
+                patch_v_t = self.llm2vae(patch_vae_out)
+                cfg_text_patch_v_t_list.append(patch_v_t)
+            cfg_text_vae_v_t_3d = torch.stack(cfg_text_patch_v_t_list, dim=0)
+            
+            cfg_text_v_t = concat_patches_to_latent(
+                patched_latent=cfg_text_vae_v_t_3d,
+                patch_info=patch_info,
+                image_sizes=image_sizes,
+                latent_downsample=self.latent_downsample,
+                latent_channel=self.latent_channel,
+                latent_patch_size_model=self.latent_patch_size,
+            )
+        else:
+            cfg_text_v_t = None
+        
+        # ============================================================
+        # CFG - image scale (patched approach)
+        # ============================================================
+        if cfg_img_scale > 1.0 and cfg_img_past_key_values is not None:
+            if self.language_model.model.enable_taylorseer:
+                self.language_model.model.cache_dic = model_pred_img_cache_dic
+                self.language_model.model.current = model_pred_img_current
+            
+            cfg_img_kv_len = cfg_img_past_key_values.seq_lens
+            if isinstance(cfg_img_kv_len, torch.Tensor):
+                cfg_img_kv_len = cfg_img_kv_len.item() if cfg_img_kv_len.numel() == 1 else cfg_img_kv_len[0].item()
+            
+            cfg_img_output_seqs = self.language_model.forward_inference_patched(
+                patch_sequences=patch_sequences,
+                patch_position_ids=patch_position_ids,
+                patch_vae_indexes=patch_vae_indexes,
+                patch_text_indexes=patch_text_indexes,
+                past_key_values=cfg_img_past_key_values,
+                past_key_values_len=cfg_img_kv_len,
+                update_past_key_values=False,
+                is_causal=False,
+                mode="gen",
+            )
+            
+            cfg_img_patch_v_t_list = []
+            for p, (out_seq, vae_idx) in enumerate(zip(cfg_img_output_seqs, patch_vae_indexes)):
+                patch_vae_out = out_seq[vae_idx]
+                patch_v_t = self.llm2vae(patch_vae_out)
+                cfg_img_patch_v_t_list.append(patch_v_t)
+            cfg_img_vae_v_t_3d = torch.stack(cfg_img_patch_v_t_list, dim=0)
+            
+            cfg_img_v_t = concat_patches_to_latent(
+                patched_latent=cfg_img_vae_v_t_3d,
+                patch_info=patch_info,
+                image_sizes=image_sizes,
+                latent_downsample=self.latent_downsample,
+                latent_channel=self.latent_channel,
+                latent_patch_size_model=self.latent_patch_size,
+            )
+        else:
+            cfg_img_v_t = None
+        
+        # ============================================================
+        # Apply CFG
+        # ============================================================
+        if cfg_text_scale > 1.0 and cfg_text_v_t is not None:
+            if cfg_renorm_type == "text_channel":
+                v_t_text_ = cfg_text_v_t + cfg_text_scale * (v_t - cfg_text_v_t)
+                norm_v_t = torch.norm(v_t, dim=-1, keepdim=True)
+                norm_v_t_text_ = torch.norm(v_t_text_, dim=-1, keepdim=True)
+                scale = (norm_v_t / (norm_v_t_text_ + 1e-8)).clamp(min=cfg_renorm_min, max=1.0)
+                v_t_text = v_t_text_ * scale
+                if cfg_img_scale > 1.0 and cfg_img_v_t is not None:
+                    v_t = cfg_img_v_t + cfg_img_scale * (v_t_text - cfg_img_v_t)
+                else:
+                    v_t = v_t_text
+            else:
+                v_t_text_ = cfg_text_v_t + cfg_text_scale * (v_t - cfg_text_v_t)
+                
+                if cfg_img_scale > 1.0 and cfg_img_v_t is not None:
+                    v_t_ = cfg_img_v_t + cfg_img_scale * (v_t_text_ - cfg_img_v_t)
+                else:
+                    v_t_ = v_t_text_
+                
+                if cfg_renorm_type == "global":
+                    norm_v_t = torch.norm(v_t)
+                    norm_v_t_ = torch.norm(v_t_)
+                elif cfg_renorm_type == "channel":
+                    norm_v_t = torch.norm(v_t, dim=-1, keepdim=True)
+                    norm_v_t_ = torch.norm(v_t_, dim=-1, keepdim=True)
+                else:
+                    raise NotImplementedError(f"{cfg_renorm_type} is not supported")
+                scale = (norm_v_t / (norm_v_t_ + 1e-8)).clamp(min=cfg_renorm_min, max=1.0)
+                v_t = v_t_ * scale
+        
+        return v_t
 
     @torch.no_grad
     def _forward_flow(
@@ -836,8 +1390,8 @@ class Bagel(PreTrainedModel):
             past_key_values=past_key_values,
             key_values_lens=key_values_lens,
             packed_key_value_indexes=packed_key_value_indexes,
-            update_past_key_values=False,
-            is_causal=False,
+            update_past_key_values=False, # no update past key values
+            is_causal=False, # no causal mask
             **extra_inputs,
         )
         v_t = self.llm2vae(output.packed_query_sequence)
@@ -881,6 +1435,7 @@ class Bagel(PreTrainedModel):
             cfg_img_v_t = self.llm2vae(cfg_img_output.packed_query_sequence)
             cfg_img_v_t = cfg_img_v_t[packed_vae_token_indexes]
 
+        # CFG applied to v_t
         if cfg_text_scale > 1.0:
             if cfg_renorm_type == "text_channel":
                 v_t_text_ = cfg_text_v_t + cfg_text_scale * (v_t - cfg_text_v_t)

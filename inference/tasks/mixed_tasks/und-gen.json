@@ -13,7 +13,7 @@
     "task_id": "v1_215_Chorleywood_is_a_vil",
     "type": "image_understanding",
     "prompt": "Chorleywood is a village near London whose population has increased steadily since the middle of the nineteenth century. The map below shows the development of the village.\\n\\nWrite a report for a university lecturer describing the development of the village. \\n\\nYou should write at least 150 words.",
-    "image": "./data_profile/images/understand_long/v1_215.jpg",
+    "image": "./inference/tasks/images/understand_long/v1_215.jpg",
     "think": true
   }
 ]

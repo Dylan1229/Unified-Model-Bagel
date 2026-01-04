@@ -41,16 +41,31 @@ def load_input_image(image_path: Optional[Path]) -> Optional[Image.Image]:
 
 # ********************************** Task Runners ****************************** #
 
-def run_text_to_image(inferencer, task: TaskSpec, default_shape: Tuple[int, int], enable_taylorseer: bool = False):
+def run_text_to_image(
+    inferencer, 
+    task: TaskSpec, 
+    default_shape: Tuple[int, int], 
+    enable_taylorseer: bool = False,
+    is_sliced: bool = False,
+    patch_size: int = 256,
+):
     """
     Handles Text-to-Image generation, including optional 'Thinking' step.
+    
+    Args:
+        inferencer: The InterleaveInferencer instance
+        task: TaskSpec with generation parameters
+        default_shape: Default image shape (H, W)
+        enable_taylorseer: Whether to use TaylorSeer caching
+        is_sliced: Whether to use patch-based diffusion
+        patch_size: Size of patches in pixels
     """
     # 1. Initialize Context
     gen_context = inferencer.init_gen_context()
     cfg_text_ctx = inferencer.init_gen_context()
     cfg_img_ctx = inferencer.init_gen_context()
 
-    # 2. Handle "Thinking" (Plan Generation) if requested
+    # 2. Handle "Thinking" if requested
     think_text = None
     if task.think:
         gen_context = inferencer.update_context_text(GEN_THINK_SYSTEM_PROMPT, gen_context)
@@ -66,7 +81,7 @@ def run_text_to_image(inferencer, task: TaskSpec, default_shape: Tuple[int, int]
         gen_context = inferencer.update_context_text(think_text, gen_context)
         cfg_img_ctx = inferencer.update_context_text(think_text, cfg_img_ctx)
 
-    # 3. Prepare Image Generation Context
+    # 3. Prepare Image Generation Context (Prefill)
     prompt = task.prompt or ""
     gen_context = inferencer.update_context_text(prompt, gen_context)
     cfg_text_ctx = inferencer.update_context_text(prompt, inferencer.init_gen_context()) 
@@ -75,6 +90,10 @@ def run_text_to_image(inferencer, task: TaskSpec, default_shape: Tuple[int, int]
     # 4. Generate Image
     image_shape = task.image_shape or default_shape
     cfg_interval = normalize_interval(get_param(task.params, "cfg_interval", None), DEFAULT_CFG_INTERVAL)
+    
+    # Check for patch parameters in task.params
+    task_is_sliced = bool(get_param(task.params, "is_sliced", is_sliced))
+    task_patch_size = int(get_param(task.params, "patch_size", patch_size))
 
     image = inferencer.gen_image(
         image_shape,
@@ -89,12 +108,18 @@ def run_text_to_image(inferencer, task: TaskSpec, default_shape: Tuple[int, int]
         cfg_renorm_min=float(get_param(task.params, "cfg_renorm_min", 0.0)),
         cfg_renorm_type=get_param(task.params, "cfg_renorm_type", "global"),
         enable_taylorseer=enable_taylorseer,
+        # Patch-based diffusion parameters
+        is_sliced=task_is_sliced,
+        patch_size=task_patch_size,
     )
 
     return image, think_text
 
 
-def run_image_understanding(inferencer, task: TaskSpec):
+def run_image_understanding(
+    inferencer, 
+    task: TaskSpec
+):
     """
     Handles Image-to-Text (VLM) tasks.
     """
@@ -135,9 +160,24 @@ def run_image_understanding(inferencer, task: TaskSpec):
     return generated_text
 
 
-def run_image_editing(inferencer, task: TaskSpec, default_shape: Tuple[int, int], enable_taylorseer: bool = False):
+def run_image_editing(
+    inferencer, 
+    task: TaskSpec, 
+    default_shape: Tuple[int, int], 
+    enable_taylorseer: bool = False,
+    is_sliced: bool = False,
+    patch_size: int = 256,
+):
     """
     Handles Image Editing tasks (Image+Text -> Image).
+    
+    Args:
+        inferencer: The InterleaveInferencer instance
+        task: TaskSpec with generation parameters
+        default_shape: Default image shape (H, W)
+        enable_taylorseer: Whether to use TaylorSeer caching
+        is_sliced: Whether to use patch-based diffusion
+        patch_size: Size of patches in pixels (e.g., 256, 512)
     """
     input_image = load_input_image(task.image_path)
     if input_image is None:
@@ -172,6 +212,10 @@ def run_image_editing(inferencer, task: TaskSpec, default_shape: Tuple[int, int]
 
     # 4. Generate Edited Image
     cfg_interval = normalize_interval(get_param(task.params, "cfg_interval", None), DEFAULT_CFG_INTERVAL)
+    
+    # Check for patch parameters in task.params (can override function args)
+    task_is_sliced = bool(get_param(task.params, "is_sliced", is_sliced))
+    task_patch_size = int(get_param(task.params, "patch_size", patch_size))
 
     image = inferencer.gen_image(
         target_shape,
@@ -184,6 +228,8 @@ def run_image_editing(inferencer, task: TaskSpec, default_shape: Tuple[int, int]
         timestep_shift=float(get_param(task.params, "timestep_shift", 3.0)),
         num_timesteps=int(get_param(task.params, "num_timesteps", 50)),
         enable_taylorseer=enable_taylorseer,
+        is_sliced=task_is_sliced,
+        patch_size=task_patch_size,
     )
 
     return image, None

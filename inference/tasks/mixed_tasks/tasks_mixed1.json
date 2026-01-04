@@ -3,21 +3,21 @@
     "task_id": "edit_room_Add_sunlight_coming",
     "type": "image_editing",
     "prompt": "Add sunlight coming through the window and a cozy plant to this room.",
-    "image": "./data_profile/images/room.jpg",
+    "image": "./inference/tasks/images/room.jpg",
     "think": true
   },
   {
     "task_id": "v1_213_The_table_below_give",
     "type": "image_understanding",
     "prompt": "The table below gives information on consumer spending on different items in five different countries in 2002.\\n\\nSummarise the information by selecting and reporting the main features, and make comparisons where relevant.\\n\\nYou should write at least 150 words.",
-    "image": "./data_profile/images/understand_long/v1_213.jpg",
+    "image": "./inference/tasks/images/understand_long/v1_213.jpg",
     "think": true
   },
   {
     "task_id": "edit_bike_Make_the_dog_wear_su",
     "type": "image_editing",
     "prompt": "Make the dog wear sunglasses and the cat wear a hat while riding the bike.",
-    "image": "./data_profile/images/bike.jpg",
+    "image": "./inference/tasks/images/bike.jpg",
     "think": true
   },
   {
@@ -36,7 +36,7 @@
     "task_id": "v1_215_Chorleywood_is_a_vil",
     "type": "image_understanding",
     "prompt": "Chorleywood is a village near London whose population has increased steadily since the middle of the nineteenth century. The map below shows the development of the village.\\n\\nWrite a report for a university lecturer describing the development of the village. \\n\\nYou should write at least 150 words.",
-    "image": "./data_profile/images/understand_long/v1_215.jpg",
+    "image": "./inference/tasks/images/understand_long/v1_215.jpg",
     "think": true
   }
 ]

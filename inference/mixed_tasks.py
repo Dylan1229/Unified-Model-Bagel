@@ -35,6 +35,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--enable_taylorseer", action="store_true")
     parser.add_argument("--local_rank", type=int, default=-1)
     parser.add_argument("--distributed_backend", type=str, default="nccl")
+    parser.add_argument("--is_sliced", action="store_true", 
+                        help="Enable patch-based diffusion")
+    parser.add_argument("--patch_size", type=int, default=256,
+                        help="Patch size in pixels for patch-based diffusion")
     return parser.parse_args()
 
 TEXT_TO_IMAGE_KINDS = {"text2image", "text-to-image", "txt2img", "txt-to-img"}
@@ -80,19 +84,25 @@ def configure_devices(args, dist_ctx, available_gpus):
 
 def main() -> None:
     args = parse_args()
+    if args.is_sliced:
+        print("Patch-based diffusion is enabled.")
+    else:
+        print("Patch-based diffusion is disabled.")
+    
+    # Set up distributed running
     dist_ctx = setup_distributed(args.local_rank)
     available_gpus = torch.cuda.device_count()
-    
     device_ids, rank, world_size = configure_devices(args, dist_ctx, available_gpus)
     distributed = dist_ctx.enabled
-    output_dir = prepare_output_dir(args.output, rank, distributed)
 
+    # Preparation
+    output_dir = prepare_output_dir(args.output, rank, distributed)
     setup_seed(args.seed)
-    
+
     # Load all tasks
     all_tasks = load_tasks(args.tasks, output_dir)
     
-    # *** Data Parallel Split ***
+    # Assign tasks to each GPU
     # Each GPU takes a slice of the tasks: [0, 1, 2, 3] -> GPU0:[0, 2], GPU1:[1, 3]
     if distributed:
         my_tasks = all_tasks[rank::world_size]
@@ -113,19 +123,25 @@ def main() -> None:
         offload_dir=offload_root,
     )
     
+    # Initialize Inferencer
     inferencer = InterleaveInferencer(model, vae_model, tokenizer, vae_transform, vit_transform, new_token_ids)
     
-    # *** Main Execution Loop ***
+    # Main Execution Loop
     start_time = time.perf_counter()
     
     for i, task in enumerate(my_tasks):
         print(f"[Rank {rank}] Running Task {i+1}/{len(my_tasks)}: {task.task_id} ({task.kind})")
         
         try:
-            # 1. Dispatch based on kind
+            # Image Generation
             if task.kind in TEXT_TO_IMAGE_KINDS:
                 image, plan_text = run_text_to_image(
-                    inferencer, task, tuple(args.default_shape), args.enable_taylorseer
+                    inferencer, 
+                    task, 
+                    tuple(args.default_shape), 
+                    args.enable_taylorseer,
+                    is_sliced=args.is_sliced,
+                    patch_size=args.patch_size,
                 )
                 
                 # Save Outputs
@@ -136,6 +152,7 @@ def main() -> None:
                     path = ensure_path(task.output_text, f"{task.task_id}_plan", output_dir, ".txt")
                     path.write_text(plan_text, encoding="utf-8")
 
+            # Image Understanding
             elif task.kind in UNDERSTANDING_KINDS:
                 generated_text = run_image_understanding(inferencer, task)
                 
@@ -144,14 +161,18 @@ def main() -> None:
                     path.write_text(generated_text, encoding="utf-8")
                     print(f"   > Output: {generated_text[:50]}...")
 
+            # Image Editing
             elif task.kind in IMAGE_EDITING_KINDS:
                 image, _ = run_image_editing(
-                    inferencer, task, tuple(args.default_shape), args.enable_taylorseer
+                    inferencer, task, tuple(args.default_shape), args.enable_taylorseer,
+                    is_sliced=args.is_sliced,
+                    patch_size=args.patch_size,
                 )
                 if image:
                     path = ensure_path(task.output_image, task.task_id, output_dir, ".png")
                     image.save(path)
             
+            # Unknown Task
             else:
                 print(f"[Warning] Unknown task kind: {task.kind}")
 

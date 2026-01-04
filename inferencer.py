@@ -129,9 +129,12 @@ class InterleaveInferencer:
         num_timesteps=50, 
         timestep_shift=3.0,
         enable_taylorseer=False,
+        # Patch-based diffusion parameters
+        is_sliced=False,
+        patch_size=256,
     ):
         # print(cfg_renorm_type)
-        # torch.cuda.nvtx.range_push("Prepare Latent & CFG")
+        torch.cuda.nvtx.range_push("Prepare Latent & CFG")
         past_key_values = gen_context['past_key_values']
         kv_lens = gen_context['kv_lens']
         ropes = gen_context['ropes']
@@ -174,8 +177,8 @@ class InterleaveInferencer:
             key: value.to(device=device, non_blocking=True) if isinstance(value, torch.Tensor) else value
             for key, value in generation_input_cfg_img.items()
         }
-        # torch.cuda.nvtx.range_pop()
-        torch.cuda.nvtx.range_push("Diffusion Process")
+        torch.cuda.nvtx.range_pop()
+        torch.cuda.nvtx.range_push("Diffusion Process" + (" (Patched)" if is_sliced else ""))
         unpacked_latent = self.model.generate_image(
             past_key_values=past_key_values,
             cfg_text_past_key_values=cfg_text_past_key_values,
@@ -197,6 +200,11 @@ class InterleaveInferencer:
             cfg_img_key_values_lens=generation_input_cfg_img['cfg_key_values_lens'],
             cfg_img_packed_key_value_indexes=generation_input_cfg_img['cfg_packed_key_value_indexes'],
             enable_taylorseer=enable_taylorseer,
+            # Patch-based diffusion parameters
+            is_sliced=is_sliced,
+            patch_size=patch_size,
+            image_sizes=[image_shape],
+            new_token_ids=self.new_token_ids,
         )
         torch.cuda.nvtx.range_pop()
         torch.cuda.nvtx.range_push("VAE Decode")
@@ -233,7 +241,13 @@ class InterleaveInferencer:
         return image
 
     @torch.no_grad()
-    def gen_text(self, gen_context, max_length: int = 500, do_sample: bool = True, temperature: float = 1.0):
+    def gen_text(
+        self, 
+        gen_context, 
+        max_length: int = 500, 
+        do_sample: bool = True, 
+        temperature: float = 1.0
+    ):
         gen_context = deepcopy(gen_context)
         past_key_values = gen_context['past_key_values']
         kv_lens = gen_context['kv_lens']
@@ -271,6 +285,9 @@ class InterleaveInferencer:
         cfg_renorm_type="global",
         image_shapes=(1024, 1024),
         enable_taylorseer=False,
+        # Patch-based diffusion parameters
+        is_sliced=False,
+        patch_size=256,
     ) -> List[Union[str, Image.Image]]:
 
         output_list = []
@@ -347,6 +364,9 @@ class InterleaveInferencer:
                     cfg_renorm_min=cfg_renorm_min,
                     cfg_renorm_type=cfg_renorm_type,
                     enable_taylorseer=enable_taylorseer,
+                    # Patch-based diffusion parameters
+                    is_sliced=is_sliced,
+                    patch_size=patch_size,
                 )
                 torch.cuda.nvtx.range_pop()
                 output_list.append(img)
