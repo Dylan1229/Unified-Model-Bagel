@@ -1,6 +1,6 @@
 #!/bin/bash
 export cuda_visible_devices=0
-project_root="/mnt"
+project_root="/workspace"
 if [[ ":$PYTHONPATH:" != *":$project_root:"* ]]; then
   export PYTHONPATH="$project_root:$PYTHONPATH"
 fi
